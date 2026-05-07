@@ -1,6 +1,11 @@
 name: Daily A-share dashboard
 
 on:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/daily-dashboard.yml"
   schedule:
     # 18:30 Asia/Shanghai. GitHub Actions cron uses UTC.
     - cron: "30 10 * * *"

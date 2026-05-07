@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A 股低估高息筛选看板</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d8dee9;
+      --accent: #0f766e;
+      --accent-2: #2563eb;
+      --danger: #b42318;
+      --soft: #e8f4f1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+    .hero {
+      background: linear-gradient(120deg, #0f766e 0%, #1d4ed8 100%);
+      color: white;
+      padding: 34px 42px 28px;
+    }
+    .hero h1 {
+      margin: 0 0 10px;
+      font-size: 30px;
+      line-height: 1.2;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+    .hero p {
+      margin: 0;
+      max-width: 980px;
+      color: rgba(255,255,255,.88);
+      font-size: 15px;
+      line-height: 1.7;
+    }
+    .wrap { max-width: 1440px; margin: 0 auto; padding: 24px 28px 42px; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: -44px;
+      margin-bottom: 18px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(216,222,233,.9);
+      border-radius: 8px;
+      padding: 16px 18px;
+      box-shadow: 0 10px 28px rgba(20, 30, 50, .08);
+      min-height: 96px;
+    }
+    .card .label { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    .card .value { font-size: 24px; font-weight: 750; line-height: 1.1; }
+    .card .hint { color: var(--muted); font-size: 12px; margin-top: 8px; line-height: 1.35; }
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      margin: 16px 0;
+      flex-wrap: wrap;
+    }
+    .search {
+      width: min(420px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px 12px;
+      font-size: 14px;
+      background: white;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .warning, .empty {
+      border-radius: 8px;
+      padding: 13px 15px;
+      margin: 14px 0;
+      line-height: 1.6;
+    }
+    .warning { background: #fff4e5; color: #8a4b00; border: 1px solid #ffd8a8; }
+    .empty { background: #eef4ff; color: #1e3a8a; border: 1px solid #c7d7fe; }
+    .table-wrap {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: auto;
+      box-shadow: 0 8px 22px rgba(20, 30, 50, .05);
+    }
+    table {
+      border-collapse: separate;
+      border-spacing: 0;
+      width: 100%;
+      min-width: 1180px;
+      font-size: 13px;
+    }
+    th, td {
+      border-bottom: 1px solid #edf0f5;
+      padding: 11px 10px;
+      white-space: nowrap;
+      text-align: left;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #f8fafc;
+      color: #344054;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      user-select: none;
+    }
+    th::after {
+      content: "↕";
+      color: #98a2b3;
+      font-size: 11px;
+      margin-left: 6px;
+    }
+    th.sorted-asc::after {
+      content: "↑";
+      color: var(--accent-2);
+    }
+    th.sorted-desc::after {
+      content: "↓";
+      color: var(--accent-2);
+    }
+    th.sorted-asc, th.sorted-desc {
+      color: var(--accent-2);
+      background: #eef4ff;
+    }
+    tr:hover td { background: #f6fbfa; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .danger { color: var(--danger); font-weight: 700; }
+    .foot {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    @media (max-width: 960px) {
+      .hero { padding: 26px 20px 72px; }
+      .hero h1 { font-size: 24px; }
+      .wrap { padding: 18px 14px 32px; }
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: -58px; }
+      .card .value { font-size: 21px; }
+    }
+    </style>
+</head>
+<body>
+  <section class="hero">
+    <h1>A 股低估高息筛选看板</h1>
+    <p>筛选条件：现价低于 120 日半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富与巨潮资讯接口。</p>
+  </section>
+  <main class="wrap">
+    <section class="cards">
+      <div class="card"><div class="label">入选股票</div><div class="value">82</div><div class="hint">同时满足价格和股息条件</div></div>
+      <div class="card"><div class="label">覆盖股票</div><div class="value">5495</div><div class="hint">真实数据</div></div>
+      <div class="card"><div class="label">平均股息率</div><div class="value">4.94%</div><div class="hint">入选股票均值</div></div>
+      <div class="card"><div class="label">平均半年线乖离</div><div class="value">-16.06%</div><div class="hint">越低代表越偏离半年线</div></div>
+      <div class="card"><div class="label">覆盖行业</div><div class="value">45</div><div class="hint">按东方财富个股行业</div></div>
+    </section>
+    <div class="toolbar">
+      <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
+      <div class="meta">
+        生成时间：2026-05-08 00:22:28<br>
+        价格预筛：985；股息筛后：82；价格/估值数据失败：76；股息失败：18；行业失败：0
+      </div>
+    </div>
+    <div class='warning'>有部分股票数据获取失败。AKShare 依赖外部网站，建议稍后重跑，或升级 AKShare 后使用缓存续跑。</div>
+    
+    <div class="table-wrap">
+      <table id="stock-table">
+        <thead>
+          <tr>
+            <th onclick="sortTable(0)">代码</th>
+            <th onclick="sortTable(1)">名称</th>
+            <th onclick="sortTable(2)">所属行业</th>
+            <th onclick="sortTable(3)" class="num">股价</th>
+            <th onclick="sortTable(4)" class="num">半年线</th>
+            <th onclick="sortTable(5)" class="num">半年线乖离率</th>
+            <th onclick="sortTable(6)" class="num">股息率</th>
+            <th onclick="sortTable(7)" class="num">市盈率</th>
+            <th onclick="sortTable(8)" class="num">PE 10年分位</th>
+            <th onclick="sortTable(9)" class="num">市净率</th>
+            <th onclick="sortTable(10)" class="num">PB 10年分位</th>
+            <th onclick="sortTable(11)" class="num">总市值</th>
+            <th onclick="sortTable(12)">估值日期</th>
+            <th onclick="sortTable(13)">价格日期</th>
+          </tr>
+        </thead>
+        <tbody><tr><td><strong>000915</strong></td><td>华特达因</td><td>化学制药</td><td class='num'>28.81</td><td class='num'>32.46</td><td class='num danger'>-11.24%</td><td class='num'>8.68%</td><td class='num'>14.57</td><td class='num'>27.9%</td><td class='num'>-</td><td class='num'>11.6%</td><td class='num'>68 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300979</strong></td><td>华利集团</td><td>纺织制造</td><td class='num'>38.06</td><td class='num'>50.21</td><td class='num danger'>-24.20%</td><td class='num'>8.67%</td><td class='num'>15.70</td><td class='num'>2.4%</td><td class='num'>-</td><td class='num'>0.2%</td><td class='num'>444 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603008</strong></td><td>ST喜临门</td><td>家居用品</td><td class='num'>9.31</td><td class='num'>18.76</td><td class='num danger'>-50.38%</td><td class='num'>8.59%</td><td class='num'>25.50</td><td class='num'>72.8%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>34 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002572</strong></td><td>索菲亚</td><td>家居用品</td><td class='num'>11.88</td><td class='num'>13.52</td><td class='num danger'>-12.13%</td><td class='num'>8.42%</td><td class='num'>13.45</td><td class='num'>31.1%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>114 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002088</strong></td><td>鲁阳节能</td><td>装修建材</td><td class='num'>9.93</td><td class='num'>11.20</td><td class='num danger'>-11.35%</td><td class='num'>8.06%</td><td class='num'>-358.27</td><td class='num'>-</td><td class='num'>-</td><td class='num'>21.8%</td><td class='num'>51 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603833</strong></td><td>欧派家居</td><td>家居用品</td><td class='num'>46.50</td><td class='num'>53.94</td><td class='num danger'>-13.79%</td><td class='num'>8.00%</td><td class='num'>15.36</td><td class='num'>26.9%</td><td class='num'>-</td><td class='num'>0.5%</td><td class='num'>283 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300501</strong></td><td>海顺新材</td><td>包装印刷</td><td class='num'>13.70</td><td class='num'>16.31</td><td class='num danger'>-16.00%</td><td class='num'>7.81%</td><td class='num'>-74.20</td><td class='num'>-</td><td class='num'>-</td><td class='num'>31.8%</td><td class='num'>38 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600729</strong></td><td>重庆百货</td><td>一般零售</td><td class='num'>21.38</td><td class='num'>24.73</td><td class='num danger'>-13.55%</td><td class='num'>7.11%</td><td class='num'>11.09</td><td class='num'>48.6%</td><td class='num'>-</td><td class='num'>1.0%</td><td class='num'>94 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>601567</strong></td><td>三星电气</td><td>电网设备</td><td class='num'>20.27</td><td class='num'>25.13</td><td class='num danger'>-19.33%</td><td class='num'>6.78%</td><td class='num'>29.92</td><td class='num'>98.0%</td><td class='num'>-</td><td class='num'>66.2%</td><td class='num'>285 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000913</strong></td><td>钱江摩托</td><td>摩托车及其他</td><td class='num'>13.44</td><td class='num'>15.36</td><td class='num danger'>-12.48%</td><td class='num'>6.70%</td><td class='num'>8.31</td><td class='num'>0.1%</td><td class='num'>-</td><td class='num'>0.9%</td><td class='num'>71 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600866</strong></td><td>星湖科技</td><td>化学制品</td><td class='num'>5.81</td><td class='num'>7.10</td><td class='num danger'>-18.18%</td><td class='num'>6.54%</td><td class='num'>21.08</td><td class='num'>49.9%</td><td class='num'>-</td><td class='num'>7.9%</td><td class='num'>97 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603277</strong></td><td>银都股份</td><td>通用设备</td><td class='num'>13.33</td><td class='num'>15.94</td><td class='num danger'>-16.35%</td><td class='num'>6.38%</td><td class='num'>24.91</td><td class='num'>90.2%</td><td class='num'>-</td><td class='num'>33.8%</td><td class='num'>82 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300532</strong></td><td>今天国际</td><td>IT服务Ⅱ</td><td class='num'>7.95</td><td class='num'>11.76</td><td class='num danger'>-32.39%</td><td class='num'>6.29%</td><td class='num'>23.29</td><td class='num'>34.9%</td><td class='num'>-</td><td class='num'>0.4%</td><td class='num'>51 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000858</strong></td><td>五 粮 液</td><td>白酒Ⅱ</td><td class='num'>92.60</td><td class='num'>107.23</td><td class='num danger'>-13.65%</td><td class='num'>6.21%</td><td class='num'>28.53</td><td class='num'>52.9%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>3,594 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600067</strong></td><td>冠城新材</td><td>电网设备</td><td class='num'>3.55</td><td class='num'>4.20</td><td class='num danger'>-15.44%</td><td class='num'>6.20%</td><td class='num'>256.09</td><td class='num'>99.9%</td><td class='num'>-</td><td class='num'>83.1%</td><td class='num'>49 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>601717</strong></td><td>中创智领</td><td>专用设备</td><td class='num'>18.25</td><td class='num'>23.01</td><td class='num danger'>-20.67%</td><td class='num'>6.14%</td><td class='num'>7.95</td><td class='num'>18.1%</td><td class='num'>-</td><td class='num'>57.4%</td><td class='num'>326 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603113</strong></td><td>金能科技</td><td>化学原料</td><td class='num'>5.82</td><td class='num'>6.80</td><td class='num danger'>-14.35%</td><td class='num'>6.10%</td><td class='num'>-7.66</td><td class='num'>-</td><td class='num'>-</td><td class='num'>15.8%</td><td class='num'>49 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000568</strong></td><td>泸州老窖</td><td>白酒Ⅱ</td><td class='num'>99.05</td><td class='num'>115.93</td><td class='num danger'>-14.56%</td><td class='num'>6.01%</td><td class='num'>14.66</td><td class='num'>17.9%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>1,458 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>001299</strong></td><td>美能能源</td><td>燃气Ⅱ</td><td class='num'>11.00</td><td class='num'>13.16</td><td class='num danger'>-16.40%</td><td class='num'>5.91%</td><td class='num'>33.34</td><td class='num'>63.1%</td><td class='num'>-</td><td class='num'>40.8%</td><td class='num'>35 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000521</strong></td><td>长虹美菱</td><td>白色家电</td><td class='num'>5.72</td><td class='num'>6.41</td><td class='num danger'>-10.79%</td><td class='num'>5.77%</td><td class='num'>19.70</td><td class='num'>44.2%</td><td class='num'>-</td><td class='num'>58.4%</td><td class='num'>59 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600690</strong></td><td>海尔智家</td><td>白色家电</td><td class='num'>21.44</td><td class='num'>24.99</td><td class='num danger'>-14.21%</td><td class='num'>5.76%</td><td class='num'>10.74</td><td class='num'>2.0%</td><td class='num'>-</td><td class='num'>1.0%</td><td class='num'>2,011 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002303</strong></td><td>美盈森</td><td>包装印刷</td><td class='num'>3.45</td><td class='num'>3.92</td><td class='num danger'>-12.09%</td><td class='num'>5.71%</td><td class='num'>21.84</td><td class='num'>51.5%</td><td class='num'>-</td><td class='num'>47.7%</td><td class='num'>53 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300795</strong></td><td>米奥会展</td><td>专业服务</td><td class='num'>11.05</td><td class='num'>13.34</td><td class='num danger'>-17.14%</td><td class='num'>5.58%</td><td class='num'>22.19</td><td class='num'>7.5%</td><td class='num'>-</td><td class='num'>27.9%</td><td class='num'>33 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603589</strong></td><td>口子窖</td><td>白酒Ⅱ</td><td class='num'>23.44</td><td class='num'>28.39</td><td class='num danger'>-17.45%</td><td class='num'>5.55%</td><td class='num'>35.81</td><td class='num'>99.6%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>140 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000596</strong></td><td>古井贡酒</td><td>白酒Ⅱ</td><td class='num'>108.22</td><td class='num'>130.09</td><td class='num danger'>-16.81%</td><td class='num'>5.54%</td><td class='num'>20.24</td><td class='num'>24.5%</td><td class='num'>-</td><td class='num'>1.1%</td><td class='num'>572 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002393</strong></td><td>力生制药</td><td>化学制药</td><td class='num'>16.59</td><td class='num'>21.66</td><td class='num danger'>-23.42%</td><td class='num'>5.42%</td><td class='num'>12.41</td><td class='num'>6.5%</td><td class='num'>-</td><td class='num'>35.4%</td><td class='num'>51 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603569</strong></td><td>长久物流</td><td>物流</td><td class='num'>6.66</td><td class='num'>7.46</td><td class='num danger'>-10.78%</td><td class='num'>5.41%</td><td class='num'>-44.46</td><td class='num'>-</td><td class='num'>-</td><td class='num'>7.1%</td><td class='num'>40 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>601766</strong></td><td>中国中车</td><td>轨交设备Ⅱ</td><td class='num'>5.94</td><td class='num'>6.65</td><td class='num danger'>-10.72%</td><td class='num'>5.39%</td><td class='num'>12.62</td><td class='num'>2.6%</td><td class='num'>-</td><td class='num'>5.7%</td><td class='num'>1,705 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603529</strong></td><td>爱玛科技</td><td>摩托车及其他</td><td class='num'>23.19</td><td class='num'>29.64</td><td class='num danger'>-21.75%</td><td class='num'>5.26%</td><td class='num'>12.38</td><td class='num'>21.6%</td><td class='num'>-</td><td class='num'>0.2%</td><td class='num'>201 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>601010</strong></td><td>ST文峰</td><td>一般零售</td><td class='num'>2.00</td><td class='num'>2.61</td><td class='num danger'>-23.40%</td><td class='num'>5.25%</td><td class='num'>-34.71</td><td class='num'>-</td><td class='num'>-</td><td class='num'>8.0%</td><td class='num'>37 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600612</strong></td><td>老凤祥</td><td>饰品</td><td class='num'>39.39</td><td class='num'>43.81</td><td class='num danger'>-10.10%</td><td class='num'>5.20%</td><td class='num'>12.20</td><td class='num'>7.6%</td><td class='num'>-</td><td class='num'>0.2%</td><td class='num'>206 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603566</strong></td><td>普莱柯</td><td>动物保健Ⅱ</td><td class='num'>11.67</td><td class='num'>13.20</td><td class='num danger'>-11.58%</td><td class='num'>5.14%</td><td class='num'>23.37</td><td class='num'>4.6%</td><td class='num'>-</td><td class='num'>0.7%</td><td class='num'>40 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600039</strong></td><td>四川路桥</td><td>基础建设</td><td class='num'>8.06</td><td class='num'>9.72</td><td class='num danger'>-17.08%</td><td class='num'>5.07%</td><td class='num'>9.99</td><td class='num'>58.3%</td><td class='num'>-</td><td class='num'>44.6%</td><td class='num'>701 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600057</strong></td><td>厦门象屿</td><td>物流</td><td class='num'>6.98</td><td class='num'>8.25</td><td class='num danger'>-15.43%</td><td class='num'>5.01%</td><td class='num'>15.19</td><td class='num'>94.5%</td><td class='num'>-</td><td class='num'>58.2%</td><td class='num'>198 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002540</strong></td><td>亚太科技</td><td>工业金属</td><td class='num'>6.03</td><td class='num'>6.99</td><td class='num danger'>-13.71%</td><td class='num'>4.98%</td><td class='num'>20.31</td><td class='num'>83.7%</td><td class='num'>-</td><td class='num'>50.1%</td><td class='num'>75 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600273</strong></td><td>嘉化能源</td><td>化学制品</td><td class='num'>8.06</td><td class='num'>9.47</td><td class='num danger'>-14.92%</td><td class='num'>4.96%</td><td class='num'>12.96</td><td class='num'>82.5%</td><td class='num'>-</td><td class='num'>5.9%</td><td class='num'>106 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>601019</strong></td><td>山东出版</td><td>出版</td><td class='num'>7.56</td><td class='num'>8.67</td><td class='num danger'>-12.80%</td><td class='num'>4.89%</td><td class='num'>13.38</td><td class='num'>86.8%</td><td class='num'>-</td><td class='num'>6.9%</td><td class='num'>158 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002367</strong></td><td>康力电梯</td><td>专用设备</td><td class='num'>6.13</td><td class='num'>7.42</td><td class='num danger'>-17.42%</td><td class='num'>4.89%</td><td class='num'>16.42</td><td class='num'>39.3%</td><td class='num'>-</td><td class='num'>7.3%</td><td class='num'>49 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002304</strong></td><td>洋河股份</td><td>白酒Ⅱ</td><td class='num'>48.63</td><td class='num'>57.57</td><td class='num danger'>-15.53%</td><td class='num'>4.76%</td><td class='num'>72.14</td><td class='num'>99.8%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>733 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600373</strong></td><td>中文传媒</td><td>出版</td><td class='num'>8.46</td><td class='num'>9.47</td><td class='num danger'>-10.65%</td><td class='num'>4.73%</td><td class='num'>53.50</td><td class='num'>100.0%</td><td class='num'>-</td><td class='num'>1.0%</td><td class='num'>114 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300360</strong></td><td>炬华科技</td><td>电网设备</td><td class='num'>14.99</td><td class='num'>17.05</td><td class='num danger'>-12.08%</td><td class='num'>4.67%</td><td class='num'>15.82</td><td class='num'>45.0%</td><td class='num'>-</td><td class='num'>28.1%</td><td class='num'>77 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>688606</strong></td><td>奥泰生物</td><td>医疗器械</td><td class='num'>54.44</td><td class='num'>64.74</td><td class='num danger'>-15.91%</td><td class='num'>4.59%</td><td class='num'>24.20</td><td class='num'>90.5%</td><td class='num'>-</td><td class='num'>9.9%</td><td class='num'>43 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600000</strong></td><td>浦发银行</td><td>银行Ⅱ</td><td class='num'>9.09</td><td class='num'>10.66</td><td class='num danger'>-14.73%</td><td class='num'>4.51%</td><td class='num'>6.02</td><td class='num'>69.7%</td><td class='num'>-</td><td class='num'>25.7%</td><td class='num'>3,028 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600873</strong></td><td>梅花生物</td><td>化学制品</td><td class='num'>9.48</td><td class='num'>10.79</td><td class='num danger'>-12.13%</td><td class='num'>4.49%</td><td class='num'>11.17</td><td class='num'>51.3%</td><td class='num'>-</td><td class='num'>21.0%</td><td class='num'>266 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>003012</strong></td><td>东鹏控股</td><td>家居用品</td><td class='num'>5.61</td><td class='num'>6.75</td><td class='num danger'>-16.93%</td><td class='num'>4.46%</td><td class='num'>19.53</td><td class='num'>43.8%</td><td class='num'>-</td><td class='num'>2.3%</td><td class='num'>65 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603230</strong></td><td>内蒙新华</td><td>出版</td><td class='num'>10.87</td><td class='num'>12.27</td><td class='num danger'>-11.38%</td><td class='num'>4.42%</td><td class='num'>46.61</td><td class='num'>99.9%</td><td class='num'>-</td><td class='num'>0.9%</td><td class='num'>38 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>001207</strong></td><td>联科科技</td><td>橡胶</td><td class='num'>18.19</td><td class='num'>24.87</td><td class='num danger'>-26.86%</td><td class='num'>4.40%</td><td class='num'>20.06</td><td class='num'>46.5%</td><td class='num'>-</td><td class='num'>6.8%</td><td class='num'>55 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603202</strong></td><td>天有为</td><td>汽车零部件</td><td class='num'>79.54</td><td class='num'>92.62</td><td class='num danger'>-14.13%</td><td class='num'>4.39%</td><td class='num'>15.74</td><td class='num'>98.0%</td><td class='num'>-</td><td class='num'>1.2%</td><td class='num'>127 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>001206</strong></td><td>依依股份</td><td>个护用品</td><td class='num'>18.95</td><td class='num'>25.90</td><td class='num danger'>-26.83%</td><td class='num'>4.38%</td><td class='num'>22.37</td><td class='num'>45.3%</td><td class='num'>-</td><td class='num'>49.5%</td><td class='num'>35 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603369</strong></td><td>今世缘</td><td>白酒Ⅱ</td><td class='num'>27.55</td><td class='num'>32.38</td><td class='num danger'>-14.92%</td><td class='num'>4.36%</td><td class='num'>14.65</td><td class='num'>6.6%</td><td class='num'>-</td><td class='num'>1.0%</td><td class='num'>343 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002911</strong></td><td>佛燃能源</td><td>燃气Ⅱ</td><td class='num'>12.01</td><td class='num'>13.46</td><td class='num danger'>-10.79%</td><td class='num'>4.33%</td><td class='num'>15.11</td><td class='num'>8.2%</td><td class='num'>-</td><td class='num'>81.3%</td><td class='num'>156 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600028</strong></td><td>中国石化</td><td>炼化及贸易</td><td class='num'>5.27</td><td class='num'>6.03</td><td class='num danger'>-12.60%</td><td class='num'>4.33%</td><td class='num'>17.93</td><td class='num'>86.1%</td><td class='num'>-</td><td class='num'>35.0%</td><td class='num'>6,373 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300146</strong></td><td>汤臣倍健</td><td>食品加工</td><td class='num'>10.51</td><td class='num'>11.81</td><td class='num danger'>-11.03%</td><td class='num'>4.28%</td><td class='num'>24.38</td><td class='num'>43.3%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>178 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002736</strong></td><td>国信证券</td><td>证券Ⅱ</td><td class='num'>10.81</td><td class='num'>12.50</td><td class='num danger'>-13.49%</td><td class='num'>4.16%</td><td class='num'>10.21</td><td class='num'>7.7%</td><td class='num'>-</td><td class='num'>11.2%</td><td class='num'>1,107 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600559</strong></td><td>老白干酒</td><td>白酒Ⅱ</td><td class='num'>13.51</td><td class='num'>15.36</td><td class='num danger'>-12.07%</td><td class='num'>4.07%</td><td class='num'>27.91</td><td class='num'>33.1%</td><td class='num'>-</td><td class='num'>0.6%</td><td class='num'>124 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>601800</strong></td><td>中国交建</td><td>基础建设</td><td class='num'>6.94</td><td class='num'>8.12</td><td class='num danger'>-14.55%</td><td class='num'>4.03%</td><td class='num'>8.44</td><td class='num'>74.4%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>1,129 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002315</strong></td><td>焦点科技</td><td>互联网电商</td><td class='num'>32.35</td><td class='num'>44.28</td><td class='num danger'>-26.94%</td><td class='num'>4.02%</td><td class='num'>27.25</td><td class='num'>38.2%</td><td class='num'>-</td><td class='num'>66.8%</td><td class='num'>133 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603919</strong></td><td>金徽酒</td><td>白酒Ⅱ</td><td class='num'>17.65</td><td class='num'>19.88</td><td class='num danger'>-11.22%</td><td class='num'>3.97%</td><td class='num'>27.54</td><td class='num'>45.2%</td><td class='num'>-</td><td class='num'>10.6%</td><td class='num'>90 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600050</strong></td><td>中国联通</td><td>通信服务</td><td class='num'>4.49</td><td class='num'>4.99</td><td class='num danger'>-10.05%</td><td class='num'>3.86%</td><td class='num'>16.21</td><td class='num'>7.9%</td><td class='num'>-</td><td class='num'>12.0%</td><td class='num'>1,404 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600269</strong></td><td>赣粤高速</td><td>铁路公路</td><td class='num'>4.44</td><td class='num'>4.99</td><td class='num danger'>-10.94%</td><td class='num'>3.83%</td><td class='num'>9.20</td><td class='num'>50.0%</td><td class='num'>-</td><td class='num'>36.2%</td><td class='num'>104 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300232</strong></td><td>洲明科技</td><td>光学光电子</td><td class='num'>6.49</td><td class='num'>7.32</td><td class='num danger'>-11.37%</td><td class='num'>3.70%</td><td class='num'>-94.90</td><td class='num'>-</td><td class='num'>-</td><td class='num'>23.4%</td><td class='num'>71 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000625</strong></td><td>长安汽车</td><td>乘用车</td><td class='num'>9.36</td><td class='num'>11.14</td><td class='num danger'>-15.95%</td><td class='num'>3.69%</td><td class='num'>30.19</td><td class='num'>78.3%</td><td class='num'>-</td><td class='num'>27.9%</td><td class='num'>928 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>603456</strong></td><td>九洲药业</td><td>医疗服务</td><td class='num'>13.64</td><td class='num'>17.78</td><td class='num danger'>-23.30%</td><td class='num'>3.67%</td><td class='num'>18.61</td><td class='num'>13.5%</td><td class='num'>-</td><td class='num'>1.5%</td><td class='num'>121 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>689009</strong></td><td>九号公司-WD</td><td>摩托车及其他</td><td class='num'>42.68</td><td class='num'>52.08</td><td class='num danger'>-18.05%</td><td class='num'>3.64%</td><td class='num'>20.49</td><td class='num'>4.9%</td><td class='num'>-</td><td class='num'>5.2%</td><td class='num'>308 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002601</strong></td><td>龙佰集团</td><td>化学原料</td><td class='num'>16.51</td><td class='num'>19.14</td><td class='num danger'>-13.73%</td><td class='num'>3.63%</td><td class='num'>52.81</td><td class='num'>99.8%</td><td class='num'>-</td><td class='num'>6.5%</td><td class='num'>394 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>000501</strong></td><td>武商集团</td><td>一般零售</td><td class='num'>8.35</td><td class='num'>9.54</td><td class='num danger'>-12.48%</td><td class='num'>3.59%</td><td class='num'>39.83</td><td class='num'>92.6%</td><td class='num'>-</td><td class='num'>9.9%</td><td class='num'>64 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300533</strong></td><td>冰川网络</td><td>游戏Ⅱ</td><td class='num'>27.94</td><td class='num'>33.01</td><td class='num danger'>-15.37%</td><td class='num'>3.58%</td><td class='num'>22.99</td><td class='num'>23.6%</td><td class='num'>-</td><td class='num'>81.5%</td><td class='num'>66 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002984</strong></td><td>森麒麟</td><td>汽车零部件</td><td class='num'>16.75</td><td class='num'>19.88</td><td class='num danger'>-15.73%</td><td class='num'>3.52%</td><td class='num'>17.83</td><td class='num'>41.6%</td><td class='num'>-</td><td class='num'>0.1%</td><td class='num'>174 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>605338</strong></td><td>巴比食品</td><td>食品加工</td><td class='num'>22.92</td><td class='num'>27.89</td><td class='num danger'>-17.82%</td><td class='num'>3.49%</td><td class='num'>19.40</td><td class='num'>26.5%</td><td class='num'>-</td><td class='num'>28.4%</td><td class='num'>55 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600325</strong></td><td>华发股份</td><td>房地产开发</td><td class='num'>3.56</td><td class='num'>4.17</td><td class='num danger'>-14.65%</td><td class='num'>3.48%</td><td class='num'>-0.92</td><td class='num'>-</td><td class='num'>-</td><td class='num'>66.0%</td><td class='num'>98 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300791</strong></td><td>仙乐健康</td><td>食品加工</td><td class='num'>19.12</td><td class='num'>22.50</td><td class='num danger'>-15.04%</td><td class='num'>3.40%</td><td class='num'>50.11</td><td class='num'>88.5%</td><td class='num'>-</td><td class='num'>11.8%</td><td class='num'>59 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002270</strong></td><td>华明装备</td><td>电网设备</td><td class='num'>24.51</td><td class='num'>28.29</td><td class='num danger'>-13.35%</td><td class='num'>3.39%</td><td class='num'>31.32</td><td class='num'>90.9%</td><td class='num'>-</td><td class='num'>94.5%</td><td class='num'>220 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002758</strong></td><td>浙农股份</td><td>综合Ⅱ</td><td class='num'>9.00</td><td class='num'>10.06</td><td class='num danger'>-10.52%</td><td class='num'>3.33%</td><td class='num'>8.63</td><td class='num'>1.9%</td><td class='num'>-</td><td class='num'>2.6%</td><td class='num'>47 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002345</strong></td><td>潮宏基</td><td>饰品</td><td class='num'>10.56</td><td class='num'>11.98</td><td class='num danger'>-11.87%</td><td class='num'>3.31%</td><td class='num'>16.41</td><td class='num'>34.0%</td><td class='num'>-</td><td class='num'>83.1%</td><td class='num'>94 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300019</strong></td><td>硅宝科技</td><td>化学制品</td><td class='num'>18.24</td><td class='num'>21.21</td><td class='num danger'>-13.99%</td><td class='num'>3.29%</td><td class='num'>28.27</td><td class='num'>50.1%</td><td class='num'>-</td><td class='num'>14.6%</td><td class='num'>72 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002852</strong></td><td>道道全</td><td>农产品加工</td><td class='num'>9.00</td><td class='num'>10.59</td><td class='num danger'>-15.05%</td><td class='num'>3.29%</td><td class='num'>21.36</td><td class='num'>43.1%</td><td class='num'>-</td><td class='num'>8.0%</td><td class='num'>31 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600422</strong></td><td>昆药集团</td><td>中药Ⅱ</td><td class='num'>9.33</td><td class='num'>12.24</td><td class='num danger'>-23.79%</td><td class='num'>3.22%</td><td class='num'>60.02</td><td class='num'>99.8%</td><td class='num'>-</td><td class='num'>3.5%</td><td class='num'>71 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002258</strong></td><td>利尔化学</td><td>农化制品</td><td class='num'>12.48</td><td class='num'>14.51</td><td class='num danger'>-13.96%</td><td class='num'>3.21%</td><td class='num'>22.66</td><td class='num'>65.5%</td><td class='num'>-</td><td class='num'>19.9%</td><td class='num'>100 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002543</strong></td><td>万和电气</td><td>厨卫电器</td><td class='num'>8.30</td><td class='num'>9.70</td><td class='num danger'>-14.43%</td><td class='num'>3.13%</td><td class='num'>53.22</td><td class='num'>100.0%</td><td class='num'>-</td><td class='num'>5.9%</td><td class='num'>62 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>002101</strong></td><td>广东鸿图</td><td>汽车零部件</td><td class='num'>10.00</td><td class='num'>11.91</td><td class='num danger'>-16.05%</td><td class='num'>3.13%</td><td class='num'>21.37</td><td class='num'>58.5%</td><td class='num'>-</td><td class='num'>10.3%</td><td class='num'>66 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>300396</strong></td><td>ST迪瑞</td><td>医疗器械</td><td class='num'>8.34</td><td class='num'>12.73</td><td class='num danger'>-34.48%</td><td class='num'>3.12%</td><td class='num'>-8.65</td><td class='num'>-</td><td class='num'>-</td><td class='num'>0.0%</td><td class='num'>23 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr>
+<tr><td><strong>600983</strong></td><td>惠而浦</td><td>白色家电</td><td class='num'>9.33</td><td class='num'>10.60</td><td class='num danger'>-12.02%</td><td class='num'>3.11%</td><td class='num'>14.33</td><td class='num'>8.0%</td><td class='num'>-</td><td class='num'>75.2%</td><td class='num'>72 亿</td><td>2026-05-08</td><td>2026-05-08</td></tr></tbody>
+      </table>
+    </div>
+    <div class="foot">
+      口径说明：半年线使用最近 120 个交易日收盘价均值；半年线乖离率 = 现价 / 半年线 - 1；PE/PB 和历史分位仅用于参考展示，不参与筛选。该看板只做量化筛选，不构成投资建议。
+    </div>
+  </main>
+  <script>
+    function filterTable() {
+      const q = document.getElementById('search').value.toLowerCase();
+      document.querySelectorAll('#stock-table tbody tr').forEach(row => {
+        row.style.display = row.innerText.toLowerCase().includes(q) ? '' : 'none';
+      });
+    }
+    function sortTable(col) {
+      const table = document.getElementById('stock-table');
+      const tbody = table.tBodies[0];
+      const rows = Array.from(tbody.rows);
+      const previousCol = table.getAttribute('data-sort-col');
+      const previousDir = table.getAttribute('data-sort-dir');
+      const asc = previousCol != String(col) || previousDir === 'desc';
+      const parseCell = (cell) => {
+        const raw = cell.innerText.trim();
+        const normalized = raw.replace(/[,%亿]/g, '').trim();
+        const numeric = parseFloat(normalized);
+        return {
+          raw,
+          numeric,
+          isNumber: raw !== '-' && raw !== '' && !Number.isNaN(numeric)
+        };
+      };
+      rows.sort((a, b) => {
+        const av = parseCell(a.cells[col]);
+        const bv = parseCell(b.cells[col]);
+        if (av.isNumber || bv.isNumber) {
+          if (!av.isNumber) return 1;
+          if (!bv.isNumber) return -1;
+          return asc ? av.numeric - bv.numeric : bv.numeric - av.numeric;
+        }
+        return asc ? av.raw.localeCompare(bv.raw, 'zh-Hans-CN') : bv.raw.localeCompare(av.raw, 'zh-Hans-CN');
+      });
+      rows.forEach(row => tbody.appendChild(row));
+      table.setAttribute('data-sort-col', col);
+      table.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
+      table.querySelectorAll('th').forEach((th, index) => {
+        th.classList.remove('sorted-asc', 'sorted-desc');
+        th.setAttribute('aria-sort', 'none');
+        if (index === col) {
+          th.classList.add(asc ? 'sorted-asc' : 'sorted-desc');
+          th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
+        }
+      });
+    }
+    </script>
+</body>
+</html>

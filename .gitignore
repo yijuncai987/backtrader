@@ -69,3 +69,10 @@ samples2/
 datas/*.py
 
 .idea/
+
+# Generated A-share value dashboard artifacts
+cache/
+a_share_value_dashboard.html
+a_share_value_dashboard.csv
+a_share_value_dashboard_limit*.html
+a_share_value_dashboard_limit*.csv

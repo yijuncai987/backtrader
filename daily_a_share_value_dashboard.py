@@ -458,6 +458,15 @@ def latest_value_and_percentile(df: pd.DataFrame) -> tuple[float | None, float |
     return latest, rank, work["date"].iloc[-1].date().isoformat()
 
 
+def baidu_valuation_value_and_percentile(
+    symbol: str,
+    indicator: str,
+    config: ScreenConfig,
+) -> tuple[float | None, float | None, str]:
+    df = fetch_baidu_valuation_history(symbol, indicator, config)
+    return latest_value_and_percentile(df)
+
+
 def dividend_yield_ttm(symbol: str, latest_price: float | None, config: ScreenConfig) -> tuple[float | None, str]:
     latest_price = to_float(latest_price)
     if latest_price is None or latest_price <= 0:
@@ -618,6 +627,7 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
     symbol = str(row["代码"]).zfill(6)
     latest_price = to_float(row.get("最新价"))
     try:
+        fallback_errors = []
         df = fetch_incremental_value_history(row, config)
         date_col = pick_column(df.columns, ["数据日期", "date", "日期"])
         close_col = pick_column(df.columns, ["当日收盘价", "收盘", "close"])
@@ -627,7 +637,7 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
 
         required_missing = [
             name
-            for name, col in [("date", date_col), ("close", close_col), ("pe", pe_col), ("pb", pb_col)]
+            for name, col in [("date", date_col), ("close", close_col)]
             if col is None
         ]
         if required_missing:
@@ -636,8 +646,10 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
         work = df.copy()
         work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
         work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
-        work[pe_col] = pd.to_numeric(work[pe_col], errors="coerce")
-        work[pb_col] = pd.to_numeric(work[pb_col], errors="coerce")
+        if pe_col:
+            work[pe_col] = pd.to_numeric(work[pe_col], errors="coerce")
+        if pb_col:
+            work[pb_col] = pd.to_numeric(work[pb_col], errors="coerce")
         if cap_col:
             work[cap_col] = pd.to_numeric(work[cap_col], errors="coerce")
         work = work[(work[date_col].notna()) & (work[close_col].notna())].sort_values(date_col)
@@ -654,14 +666,68 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             latest_price = float(work[close_col].iloc[-1])
         deviation = (latest_price / ma - 1) * 100
         latest = recent.iloc[-1]
-        pe = to_float(latest[pe_col])
-        pb = to_float(latest[pb_col])
-        pe_pct = percentile_rank(pe, recent[pe_col])
-        pb_pct = percentile_rank(pb, recent[pb_col])
+        pe = to_float(latest[pe_col]) if pe_col else None
+        pb = to_float(latest[pb_col]) if pb_col else None
+        pe_pct = percentile_rank(pe, recent[pe_col]) if pe_col else None
+        pb_pct = percentile_rank(pb, recent[pb_col]) if pb_col else None
+
+        spot_pe = to_float(row.get("市盈率TTM"))
+        if spot_pe is None:
+            spot_pe = to_float(row.get("市盈率-动态"))
+        spot_pb = to_float(row.get("市净率"))
+        if pe is None and spot_pe is not None:
+            pe = spot_pe
+        if pb is None and spot_pb is not None:
+            pb = spot_pb
+        if pe_pct is None and pe is not None and pe_col:
+            pe_pct = percentile_rank(pe, recent[pe_col])
+        if pb_pct is None and pb is not None and pb_col:
+            pb_pct = percentile_rank(pb, recent[pb_col])
+
+        pe_fallback_date = ""
+        pb_fallback_date = ""
+        if pe is None or pe_pct is None:
+            try:
+                fallback_pe, fallback_pe_pct, pe_fallback_date = baidu_valuation_value_and_percentile(
+                    symbol, "市盈率(TTM)", config
+                )
+                if pe is None:
+                    pe = fallback_pe
+                if pe_pct is None:
+                    pe_pct = fallback_pe_pct
+            except Exception as exc:
+                fallback_errors.append(f"PE备用源: {exc}")
+        if pb is None or pb_pct is None:
+            try:
+                fallback_pb, fallback_pb_pct, pb_fallback_date = baidu_valuation_value_and_percentile(
+                    symbol, "市净率", config
+                )
+                if pb is None:
+                    pb = fallback_pb
+                if pb_pct is None:
+                    pb_pct = fallback_pb_pct
+            except Exception as exc:
+                fallback_errors.append(f"PB备用源: {exc}")
+
         pe_pass = pe_pct is not None and pe_pct <= config.max_percentile
         pb_pass = pb_pct is not None and pb_pct <= config.max_percentile
         value_date = latest[date_col].date().isoformat()
+        valuation_date = value_date or pe_fallback_date or pb_fallback_date
         market_cap = to_float(latest[cap_col]) if cap_col else to_float(row.get("总市值"))
+        missing_metrics = []
+        if pe is None:
+            missing_metrics.append("PE")
+        if pe_pct is None:
+            missing_metrics.append("PE分位")
+        if pb is None:
+            missing_metrics.append("PB")
+        if pb_pct is None:
+            missing_metrics.append("PB分位")
+        metric_error = ""
+        if missing_metrics:
+            metric_error = "估值字段仍缺失：" + ",".join(missing_metrics)
+            if fallback_errors:
+                metric_error = f"{metric_error}；{'; '.join(fallback_errors)}"
 
         return {
             "代码": symbol,
@@ -675,9 +741,9 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             "市盈率10年分位": pe_pct,
             "市净率10年分位": pb_pct,
             "估值分位达标": pe_pass or pb_pass,
-            "估值数据日期": value_date,
+            "估值数据日期": valuation_date,
             "总市值_估值源": market_cap,
-            "价格估值错误": "",
+            "价格估值错误": metric_error[:300],
         }
     except Exception as exc:
         return {
@@ -1717,7 +1783,7 @@ def build_html(
 <body>
   <section class="hero">
     <h1>A 股低估高息筛选看板</h1>
-    <p>筛选条件：现价低于 120 日半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富与巨潮资讯接口。</p>
+    <p>筛选条件：现价低于 120 日半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富、百度估值与巨潮资讯接口。</p>
   </section>
   <main class="wrap">
     <section class="cards">

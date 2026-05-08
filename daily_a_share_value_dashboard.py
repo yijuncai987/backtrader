@@ -1696,7 +1696,7 @@ def build_html(
       if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
       return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits }) + suffix;
     }
-    function renderLineChart(targetId, key, unit, color) {
+    function renderLineChart(targetId, key, unit, color, label = key) {
       const target = document.getElementById(targetId);
       if (!target) return;
       const points = marketMonitorData
@@ -1737,7 +1737,7 @@ def build_html(
         const title = `${p.date}：${formatNumber(p.value, 2, unit)}`;
         return `<circle cx="${x(index).toFixed(2)}" cy="${y(p.value).toFixed(2)}" r="3" fill="${color}"><title>${title}</title></circle>`;
       }).join('');
-      target.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${key}曲线">
+      target.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${label}曲线">
         ${grid}
         <line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" stroke="#d8dee9"/>
         <polyline fill="none" stroke="${color}" stroke-width="2.5" points="${line}"/>
@@ -1768,7 +1768,7 @@ def build_html(
         hoverDot.setAttribute('cx', cx.toFixed(2));
         hoverDot.setAttribute('cy', cy.toFixed(2));
         hoverDot.setAttribute('opacity', '1');
-        tooltip.innerHTML = `<strong>${point.date}</strong><span>${key}：${formatNumber(point.value, 2, unit)}</span>`;
+        tooltip.innerHTML = `<strong>${point.date}</strong><span>${label}：${formatNumber(point.value, 2, unit)}</span>`;
         tooltip.style.left = `${cx / width * rect.width}px`;
         tooltip.style.top = `${cy / height * rect.height}px`;
         tooltip.classList.add('visible');
@@ -1779,7 +1779,7 @@ def build_html(
     function renderMarketCharts() {
       if (monitorRendered) return;
       renderLineChart('volume-ratio-chart', '沪深300成交占比', '%', '#0f766e');
-      renderLineChart('margin-change-chart', '融资余额5日涨幅', '%', '#2563eb');
+      renderLineChart('margin-change-chart', '融资余额增长率', '%', '#2563eb', '融资余额5日涨幅');
       const latest = [...marketMonitorData].reverse().find(row => row['沪深300成交占比'] !== null || row['融资余额增长率'] !== null);
       if (latest) {
         const latestNode = document.getElementById('monitor-latest');

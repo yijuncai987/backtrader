@@ -7,8 +7,8 @@ on:
     paths:
       - ".github/workflows/daily-dashboard.yml"
   schedule:
-    # 18:30 Asia/Shanghai. GitHub Actions cron uses UTC.
-    - cron: "30 10 * * *"
+    # 03:00 Asia/Shanghai. GitHub Actions cron uses UTC.
+    - cron: "0 19 * * *"
   workflow_dispatch:
 
 permissions:

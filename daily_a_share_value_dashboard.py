@@ -848,16 +848,28 @@ def parallel_map(
     return results
 
 
+def is_st_stock_name(name) -> bool:
+    normalized = str(name or "").upper().replace(" ", "")
+    return normalized.startswith(("ST", "*ST", "SST", "S*ST"))
+
+
 def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     ensure_cache_dir(config.cache_dir)
     ensure_data_dir(config.data_dir)
     spot = fetch_spot(config)
     spot = spot.sort_values("代码").copy()
+    before_st_filter = len(spot)
+    if "名称" in spot.columns:
+        spot = spot[~spot["名称"].map(is_st_stock_name)].copy()
+    st_excluded_count = before_st_filter - len(spot)
+    if st_excluded_count:
+        log(f"剔除 ST 公司：{st_excluded_count} 条")
     if config.limit:
         spot = spot.head(config.limit).copy()
 
     diagnostics = {
         "universe_count": len(spot),
+        "st_excluded_count": st_excluded_count,
         "valuation_error_count": 0,
         "price_error_count": 0,
         "dividend_error_count": 0,
@@ -1809,7 +1821,7 @@ def build_html(
 <body>
   <section class="hero">
     <h1>A 股低估高息筛选看板</h1>
-    <p>筛选条件：现价低于 120 日半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富、百度估值与巨潮资讯接口。</p>
+    <p>筛选条件：剔除 ST 公司，现价低于 120 日半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富、百度估值与巨潮资讯接口。</p>
   </section>
   <main class="wrap">
     <section class="cards">

@@ -16,6 +16,8 @@
 - 股息率：巨潮资讯近 365 天已实施派息合计 / 当前股价。巨潮 `派息比例` 通常是 `10派X元`，脚本按 `X / 10` 折算每股派息。
 - PE/PB 十年分位：东方财富估值分析历史序列中，当前 PE 或 PB 所在的历史百分位；接口返回历史不足十年时，使用可取得的完整历史。
 - 所属行业：东方财富个股资料中的 `行业` 字段。
+- 沪深300成交占比：`沪深300成交量 / (上证指数成交量 + 深证综指成交量 + 北交所个股成交量汇总)`，展示最近 90 个自然日内的交易日曲线。
+- 融资余额增长率：`两市融资余额 / 前一交易日两市融资余额 - 1`，两市融资余额按上海和深圳融资余额合计计算，展示最近 90 个自然日内的交易日曲线。
 
 ## 数据源
 
@@ -23,6 +25,7 @@
 
 - 东方财富：沪深京 A 股实时行情、个股估值分析历史序列、个股行业。
 - 巨潮资讯：个股历史分红。
+- AKShare 指数与融资融券接口：沪深300、上证指数、深证综指、北交所个股历史成交量，以及沪深两市融资余额。
 
 ## 运行方式
 
@@ -36,6 +39,7 @@ python daily_a_share_value_dashboard.py
 
 - `a_share_value_dashboard.html`：可对外展示的静态 HTML 看板。
 - `a_share_value_dashboard.csv`：同一批入选股票的 CSV 明细。
+- `a_share_value_dashboard_market_monitor.csv`：最近 90 天市场监测数据，包含沪深300成交占比和融资余额增长率。
 
 生成后自动打开浏览器：
 
@@ -103,6 +107,7 @@ python daily_a_share_value_dashboard.py ^
   --price-window 120 ^
   --max-below-ma-pct -10 ^
   --min-dividend-yield-pct 3 ^
+  --monitor-days 90 ^
   --max-percentile 30
 ```
 
@@ -116,10 +121,14 @@ python daily_a_share_value_dashboard.py --valuation-workers 1 --request-pause 0.
 
 ## 已验证
 
-2026-05-07 本地验证结果：
+2026-05-08 本地验证结果：
 
 - `python -m py_compile daily_a_share_value_dashboard.py`：通过。
-- `python daily_a_share_value_dashboard.py --demo --output a_share_value_dashboard_demo.html`：成功生成演示面板。
+- `python daily_a_share_value_dashboard.py --demo --output a_share_value_dashboard_demo.html`：成功生成演示面板，并写出 `a_share_value_dashboard_demo_market_monitor.csv`。
+
+历史验证记录：
+
+- 2026-05-07 `python daily_a_share_value_dashboard.py --demo --output a_share_value_dashboard_demo.html`：成功生成演示面板。
 - `python daily_a_share_value_dashboard.py --limit 1 --output a_share_value_dashboard_limit1.html`：真实接口链路成功。
 - `python daily_a_share_value_dashboard.py --limit 50 --output a_share_value_dashboard_limit50.html`：真实局部筛选成功。
 - 已把旧缓存中的 5495 只股票历史迁移到 `data/a_share/value_history/`。

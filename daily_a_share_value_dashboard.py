@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import math
 import os
 import time
@@ -50,6 +51,7 @@ class ScreenConfig:
     spot_workers: int = 8
     spot_timeout: float = 60.0
     dividend_lookback_days: int = 365
+    monitor_days: int = 90
     request_pause: float = 0.0
     limit: int | None = None
     refresh: bool = False
@@ -70,6 +72,7 @@ def ensure_cache_dir(cache_dir: Path) -> None:
     (cache_dir / "valuation").mkdir(exist_ok=True)
     (cache_dir / "value").mkdir(exist_ok=True)
     (cache_dir / "industry").mkdir(exist_ok=True)
+    (cache_dir / "market_monitor").mkdir(exist_ok=True)
 
 
 def ensure_data_dir(data_dir: Path) -> None:
@@ -79,6 +82,7 @@ def ensure_data_dir(data_dir: Path) -> None:
     (data_dir / "dividends").mkdir(exist_ok=True)
     (data_dir / "industry").mkdir(exist_ok=True)
     (data_dir / "screening_results").mkdir(exist_ok=True)
+    (data_dir / "market_monitor").mkdir(exist_ok=True)
 
 
 def today_stamp() -> str:
@@ -886,6 +890,292 @@ def demo_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     return pd.DataFrame(rows), diagnostics
 
 
+def monitor_date_window(config: ScreenConfig) -> tuple[date, date]:
+    end = date.today()
+    start = end - timedelta(days=max(30, config.monitor_days) - 1)
+    return start, end
+
+
+def fetch_market_index_history(symbol: str, label: str, config: ScreenConfig) -> pd.DataFrame:
+    start, end = monitor_date_window(config)
+    cache_path = config.cache_dir / "market_monitor" / f"index_{symbol}_{start:%Y%m%d}_{end:%Y%m%d}.csv"
+    if not config.refresh and is_cache_fresh(cache_path):
+        cached = read_csv_cache(cache_path)
+        if cached is not None and not cached.empty:
+            return cached
+
+    df = ak.index_zh_a_hist(
+        symbol=symbol,
+        period="daily",
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+    )
+    if df is None or df.empty:
+        raise RuntimeError(f"{label}({symbol}) 指数历史为空")
+
+    date_col = pick_column(df.columns, ["日期", "date"])
+    volume_col = pick_column(df.columns, ["成交量", "volume"])
+    if date_col is None or volume_col is None:
+        raise RuntimeError(f"{label}({symbol}) 缺少日期或成交量字段：{df.columns.tolist()}")
+
+    work = pd.DataFrame(
+        {
+            "日期": pd.to_datetime(df[date_col], errors="coerce"),
+            f"{label}成交量": pd.to_numeric(df[volume_col], errors="coerce"),
+        }
+    )
+    work = work[(work["日期"].notna()) & (work[f"{label}成交量"].notna())].copy()
+    work = work.sort_values("日期").drop_duplicates(subset=["日期"], keep="last")
+    work["日期"] = work["日期"].dt.date.astype(str)
+    write_csv_cache(work, cache_path)
+    return work
+
+
+def fetch_bj_stock_history_for_volume(symbol: str, config: ScreenConfig) -> pd.DataFrame:
+    start, end = monitor_date_window(config)
+    cache_path = config.cache_dir / "market_monitor" / "bj_stock_volume" / f"{symbol}_{start:%Y%m%d}_{end:%Y%m%d}.csv"
+    if not config.refresh and is_cache_fresh(cache_path):
+        cached = read_csv_cache(cache_path)
+        if cached is not None:
+            return cached
+
+    try:
+        df = ak.stock_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust="",
+            timeout=15,
+        )
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["日期", "北交所成交量"])
+        date_col = pick_column(df.columns, ["日期", "date"])
+        volume_col = pick_column(df.columns, ["成交量", "volume"])
+        if date_col is None or volume_col is None:
+            return pd.DataFrame(columns=["日期", "北交所成交量"])
+        work = pd.DataFrame(
+            {
+                "日期": pd.to_datetime(df[date_col], errors="coerce"),
+                "北交所成交量": pd.to_numeric(df[volume_col], errors="coerce"),
+            }
+        )
+        work = work[(work["日期"].notna()) & (work["北交所成交量"].notna())].copy()
+        work["日期"] = work["日期"].dt.date.astype(str)
+        write_csv_cache(work, cache_path)
+        return work
+    except Exception:
+        return pd.DataFrame(columns=["日期", "北交所成交量"])
+
+
+def fetch_bj_market_volume_history(config: ScreenConfig) -> pd.DataFrame:
+    start, end = monitor_date_window(config)
+    cache_path = config.cache_dir / "market_monitor" / f"bj_market_volume_{start:%Y%m%d}_{end:%Y%m%d}.csv"
+    if not config.refresh and is_cache_fresh(cache_path):
+        cached = read_csv_cache(cache_path)
+        if cached is not None and not cached.empty:
+            return cached
+
+    codes_df = ak.stock_info_bj_name_code()
+    if codes_df is None or codes_df.empty:
+        raise RuntimeError("北交所股票列表为空")
+    code_col = pick_column(codes_df.columns, ["证券代码", "代码", "股票代码"])
+    if code_col is None:
+        raise RuntimeError("北交所股票列表缺少代码字段")
+
+    symbols = sorted({str(code).strip().zfill(6) for code in codes_df[code_col].dropna()})
+    histories = parallel_map(
+        "北交所成交量",
+        symbols,
+        lambda symbol: fetch_bj_stock_history_for_volume(symbol, config),
+        max_workers=max(1, config.spot_workers),
+    )
+    valid = [df for df in histories if df is not None and not df.empty]
+    if not valid:
+        raise RuntimeError("北交所个股历史成交量全部为空")
+
+    merged = pd.concat(valid, ignore_index=True)
+    merged["北交所成交量"] = pd.to_numeric(merged["北交所成交量"], errors="coerce")
+    merged = (
+        merged[merged["北交所成交量"].notna()]
+        .groupby("日期", as_index=False)["北交所成交量"]
+        .sum()
+        .sort_values("日期")
+    )
+    write_csv_cache(merged, cache_path)
+    return merged
+
+
+def build_volume_ratio_monitor(config: ScreenConfig) -> pd.DataFrame:
+    hs300 = fetch_market_index_history("000300", "沪深300", config)
+    markets = [
+        fetch_market_index_history("000001", "上证指数", config),
+        fetch_market_index_history("399106", "深证综指", config),
+        fetch_bj_market_volume_history(config),
+    ]
+
+    merged = hs300[["日期", "沪深300成交量"]].copy()
+    for df in markets:
+        merged = merged.merge(df[["日期", df.columns[1]]], on="日期", how="outer")
+
+    market_cols = ["上证指数成交量", "深证综指成交量", "北交所成交量"]
+    for col in ["沪深300成交量", *market_cols]:
+        if col not in merged.columns:
+            merged[col] = None
+        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+
+    merged["市场总成交量"] = merged[market_cols].sum(axis=1, min_count=1)
+    merged["沪深300成交占比"] = merged.apply(
+        lambda row: row["沪深300成交量"] / row["市场总成交量"] * 100
+        if to_float(row["沪深300成交量"]) is not None
+        and to_float(row["市场总成交量"]) is not None
+        and row["市场总成交量"] > 0
+        else None,
+        axis=1,
+    )
+    return merged[["日期", "沪深300成交量", "市场总成交量", "沪深300成交占比"]]
+
+
+def fetch_margin_macro_history(name: str, fetcher: Callable[[], pd.DataFrame], config: ScreenConfig) -> pd.DataFrame:
+    cache_path = config.cache_dir / "market_monitor" / f"margin_{name}_{today_stamp()}.csv"
+    if not config.refresh and is_cache_fresh(cache_path):
+        cached = read_csv_cache(cache_path)
+        if cached is not None and not cached.empty:
+            return cached
+
+    df = fetcher()
+    if df is None or df.empty:
+        raise RuntimeError(f"{name} 融资融券历史为空")
+    write_csv_cache(df, cache_path)
+    return df
+
+
+def normalize_margin_history(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    date_col = pick_column(df.columns, ["日期", "信用交易日期", "date"])
+    balance_col = pick_column(df.columns, ["融资余额"])
+    if date_col is None or balance_col is None:
+        raise RuntimeError(f"{label} 融资余额字段无法识别：{df.columns.tolist()}")
+
+    work = pd.DataFrame(
+        {
+            "日期": pd.to_datetime(df[date_col].astype(str), errors="coerce"),
+            f"{label}融资余额": pd.to_numeric(df[balance_col], errors="coerce"),
+        }
+    )
+    work = work[(work["日期"].notna()) & (work[f"{label}融资余额"].notna())].copy()
+    work = work.sort_values("日期").drop_duplicates(subset=["日期"], keep="last")
+    work["日期"] = work["日期"].dt.date.astype(str)
+    return work
+
+
+def build_margin_change_monitor(config: ScreenConfig) -> pd.DataFrame:
+    sh = normalize_margin_history(
+        fetch_margin_macro_history("sh", ak.macro_china_market_margin_sh, config),
+        "上海",
+    )
+    sz = normalize_margin_history(
+        fetch_margin_macro_history("sz", ak.macro_china_market_margin_sz, config),
+        "深圳",
+    )
+    merged = sh.merge(sz, on="日期", how="outer")
+    merged["上海融资余额"] = pd.to_numeric(merged["上海融资余额"], errors="coerce")
+    merged["深圳融资余额"] = pd.to_numeric(merged["深圳融资余额"], errors="coerce")
+    merged["融资余额"] = merged[["上海融资余额", "深圳融资余额"]].sum(axis=1, min_count=2)
+    merged = merged[merged["融资余额"].notna()].sort_values("日期").copy()
+    merged["融资余额增长率"] = merged["融资余额"].pct_change() * 100
+    return merged[["日期", "融资余额", "融资余额增长率"]]
+
+
+def build_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
+    start, _ = monitor_date_window(config)
+    diagnostics = {
+        "market_monitor_error": "",
+        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指 + 北交所个股成交量汇总)；融资余额：上海 + 深圳两市融资余额",
+    }
+    pieces = []
+    errors = []
+
+    try:
+        pieces.append(build_volume_ratio_monitor(config))
+    except Exception as exc:
+        errors.append(f"成交占比：{exc}")
+
+    try:
+        pieces.append(build_margin_change_monitor(config))
+    except Exception as exc:
+        errors.append(f"融资余额：{exc}")
+
+    if not pieces:
+        diagnostics["market_monitor_error"] = "；".join(errors)
+        diagnostics["market_monitor_count"] = 0
+        return pd.DataFrame(), diagnostics
+
+    monitor = pieces[0]
+    for piece in pieces[1:]:
+        monitor = monitor.merge(piece, on="日期", how="outer")
+    monitor["日期"] = pd.to_datetime(monitor["日期"], errors="coerce")
+    monitor = monitor[(monitor["日期"].notna()) & (monitor["日期"] >= pd.Timestamp(start))].copy()
+    monitor = monitor.sort_values("日期")
+    monitor["日期"] = monitor["日期"].dt.date.astype(str)
+    diagnostics["market_monitor_error"] = "；".join(errors)
+    diagnostics["market_monitor_count"] = len(monitor)
+    return monitor, diagnostics
+
+
+def demo_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
+    start, end = monitor_date_window(config)
+    rows = []
+    balance = 2_400_000_000_000.0
+    idx = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            ratio = 18 + math.sin(idx / 5) * 2.5 + (idx % 7) * 0.15
+            daily_change = math.sin(idx / 6) * 0.18 + 0.03
+            balance *= 1 + daily_change / 100
+            rows.append(
+                {
+                    "日期": current.isoformat(),
+                    "沪深300成交量": 260_000_000 + idx * 500_000,
+                    "市场总成交量": 1_500_000_000 + idx * 2_000_000,
+                    "沪深300成交占比": ratio,
+                    "融资余额": balance,
+                    "融资余额增长率": daily_change,
+                }
+            )
+            idx += 1
+        current += timedelta(days=1)
+    return pd.DataFrame(rows), {
+        "market_monitor_error": "",
+        "market_monitor_count": len(rows),
+        "market_monitor_source": "演示数据",
+    }
+
+
+def monitor_records_for_html(df: pd.DataFrame) -> str:
+    columns = ["日期", "沪深300成交占比", "沪深300成交量", "市场总成交量", "融资余额", "融资余额增长率"]
+    if df is None or df.empty:
+        return "[]"
+
+    work = df.copy()
+    for col in columns:
+        if col not in work.columns:
+            work[col] = None
+    records = []
+    for _, row in work[columns].iterrows():
+        record = {}
+        for col in columns:
+            value = row[col]
+            if pd.isna(value):
+                record[col] = None
+            elif col == "日期":
+                record[col] = str(value)
+            else:
+                record[col] = float(value)
+        records.append(record)
+    return json.dumps(records, ensure_ascii=False).replace("</", "<\\/")
+
+
 def fmt_num(value, digits: int = 2, suffix: str = "") -> str:
     value = to_float(value)
     if value is None:
@@ -924,7 +1214,12 @@ def render_table_rows(df: pd.DataFrame) -> str:
     return "\n".join(rows)
 
 
-def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str:
+def build_html(
+    df: pd.DataFrame,
+    diagnostics: dict,
+    config: ScreenConfig,
+    market_monitor: pd.DataFrame | None = None,
+) -> str:
     final_count = len(df)
     avg_dividend = df["股息率"].mean() if "股息率" in df.columns and not df.empty else None
     avg_deviation = df["半年线乖离率"].mean() if "半年线乖离率" in df.columns and not df.empty else None
@@ -952,6 +1247,13 @@ def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str
         )
 
     rows = render_table_rows(sorted_df)
+    monitor_json = monitor_records_for_html(market_monitor if market_monitor is not None else pd.DataFrame())
+    monitor_error = html.escape(str(diagnostics.get("market_monitor_error", "")))
+    monitor_source = html.escape(str(diagnostics.get("market_monitor_source", "")))
+    monitor_count = int(diagnostics.get("market_monitor_count", 0) or 0)
+    monitor_warning = ""
+    if monitor_error:
+        monitor_warning = f"<div class='warning'>市场监测数据部分获取失败：{monitor_error}</div>"
     css = """
     :root {
       --bg: #f5f7fb;
@@ -1031,6 +1333,30 @@ def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str
       font-size: 13px;
       line-height: 1.6;
     }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 10px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab-btn {
+      appearance: none;
+      border: 0;
+      border-bottom: 3px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      padding: 12px 14px 10px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      color: var(--accent-2);
+      border-bottom-color: var(--accent-2);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     .warning, .empty {
       border-radius: 8px;
       padding: 13px 15px;
@@ -1091,6 +1417,72 @@ def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str
     tr:hover td { background: #f6fbfa; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .danger { color: var(--danger); font-weight: 700; }
+    .monitor-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .monitor-head h2 {
+      margin: 0 0 6px;
+      font-size: 20px;
+      line-height: 1.25;
+    }
+    .monitor-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+      max-width: 860px;
+    }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .chart-box {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-height: 360px;
+      padding: 14px;
+      box-shadow: 0 8px 22px rgba(20, 30, 50, .05);
+    }
+    .chart-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: #344054;
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .chart-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .chart-canvas {
+      width: 100%;
+      height: 292px;
+    }
+    .chart-canvas svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .chart-empty {
+      height: 292px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      background: #f8fafc;
+      border-radius: 6px;
+      font-size: 13px;
+    }
     .foot {
       margin-top: 16px;
       color: var(--muted);
@@ -1103,9 +1495,28 @@ def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str
       .wrap { padding: 18px 14px 32px; }
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: -58px; }
       .card .value { font-size: 21px; }
+      .chart-grid { grid-template-columns: 1fr; }
+      .tabs { overflow-x: auto; }
     }
     """
     script = """
+    const marketMonitorData = __MARKET_MONITOR_JSON__;
+    let monitorRendered = false;
+
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        const active = btn.dataset.tab === tabName;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      document.querySelectorAll('.tab-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.id === `tab-${tabName}`);
+      });
+      if (tabName === 'monitor') {
+        renderMarketCharts();
+      }
+    }
+
     function filterTable() {
       const q = document.getElementById('search').value.toLowerCase();
       document.querySelectorAll('#stock-table tbody tr').forEach(row => {
@@ -1151,7 +1562,80 @@ def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str
         }
       });
     }
+    function formatNumber(value, digits = 2, suffix = '') {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+      return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits }) + suffix;
+    }
+    function renderLineChart(targetId, key, unit, color) {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      const points = marketMonitorData
+        .map(row => ({ date: row['日期'], value: row[key] }))
+        .filter(row => row.date && row.value !== null && row.value !== undefined && !Number.isNaN(Number(row.value)));
+      if (points.length < 2) {
+        target.innerHTML = "<div class='chart-empty'>暂无足够数据</div>";
+        return;
+      }
+      const width = 760;
+      const height = 292;
+      const margin = { top: 20, right: 24, bottom: 34, left: 58 };
+      const values = points.map(p => Number(p.value));
+      let min = Math.min(...values);
+      let max = Math.max(...values);
+      if (min === max) {
+        min -= 1;
+        max += 1;
+      }
+      const pad = (max - min) * 0.12;
+      min -= pad;
+      max += pad;
+      const x = index => margin.left + index * (width - margin.left - margin.right) / (points.length - 1);
+      const y = value => margin.top + (max - Number(value)) * (height - margin.top - margin.bottom) / (max - min);
+      const line = points.map((p, index) => `${x(index).toFixed(2)},${y(p.value).toFixed(2)}`).join(' ');
+      const yTicks = Array.from({ length: 5 }, (_, index) => min + (max - min) * index / 4);
+      const xTickIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1]));
+      const grid = yTicks.map(value => {
+        const yy = y(value);
+        return `<line x1="${margin.left}" y1="${yy}" x2="${width - margin.right}" y2="${yy}" stroke="#edf0f5"/><text x="${margin.left - 10}" y="${yy + 4}" text-anchor="end" fill="#667085" font-size="11">${formatNumber(value, 2, unit)}</text>`;
+      }).join('');
+      const xLabels = xTickIndexes.map(index => {
+        const p = points[index];
+        return `<text x="${x(index)}" y="${height - 10}" text-anchor="${index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}" fill="#667085" font-size="11">${p.date.slice(5)}</text>`;
+      }).join('');
+      const dots = points.map((p, index) => {
+        const title = `${p.date}：${formatNumber(p.value, 2, unit)}`;
+        return `<circle cx="${x(index).toFixed(2)}" cy="${y(p.value).toFixed(2)}" r="3" fill="${color}"><title>${title}</title></circle>`;
+      }).join('');
+      target.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${key}曲线">
+        ${grid}
+        <line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" stroke="#d8dee9"/>
+        <polyline fill="none" stroke="${color}" stroke-width="2.5" points="${line}"/>
+        ${dots}
+        ${xLabels}
+      </svg>`;
+    }
+    function renderMarketCharts() {
+      if (monitorRendered) return;
+      renderLineChart('volume-ratio-chart', '沪深300成交占比', '%', '#0f766e');
+      renderLineChart('margin-change-chart', '融资余额增长率', '%', '#2563eb');
+      const latest = [...marketMonitorData].reverse().find(row => row['沪深300成交占比'] !== null || row['融资余额增长率'] !== null);
+      if (latest) {
+        const latestNode = document.getElementById('monitor-latest');
+        if (latestNode) {
+          latestNode.textContent = `最新 ${latest['日期']}：成交占比 ${formatNumber(latest['沪深300成交占比'], 2, '%')}，融资余额增长率 ${formatNumber(latest['融资余额增长率'], 2, '%')}`;
+        }
+      }
+      monitorRendered = true;
+    }
+    window.addEventListener('resize', () => {
+      const panel = document.getElementById('tab-monitor');
+      if (panel && panel.classList.contains('active')) {
+        monitorRendered = false;
+        renderMarketCharts();
+      }
+    });
     """
+    script = script.replace("__MARKET_MONITOR_JSON__", monitor_json)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1173,51 +1657,94 @@ def build_html(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> str
       <div class="card"><div class="label">平均半年线乖离</div><div class="value">{fmt_num(avg_deviation, 2, "%")}</div><div class="hint">越低代表越偏离半年线</div></div>
       <div class="card"><div class="label">覆盖行业</div><div class="value">{industries}</div><div class="hint">按东方财富个股行业</div></div>
     </section>
-    <div class="toolbar">
-      <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
-      <div class="meta">
-        生成时间：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
-        价格预筛：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格/估值数据失败：{diagnostics.get("price_error_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}
+    <nav class="tabs" role="tablist" aria-label="看板标签页">
+      <button class="tab-btn active" data-tab="screen" role="tab" aria-selected="true" onclick="switchTab('screen')">低估高息筛选</button>
+      <button class="tab-btn" data-tab="monitor" role="tab" aria-selected="false" onclick="switchTab('monitor')">市场监测</button>
+    </nav>
+    <section id="tab-screen" class="tab-panel active" role="tabpanel">
+      <div class="toolbar">
+        <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
+        <div class="meta">
+          生成时间：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
+          价格预筛：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格/估值数据失败：{diagnostics.get("price_error_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}
+        </div>
       </div>
-    </div>
-    {warning}
-    {empty_note}
-    <div class="table-wrap">
-      <table id="stock-table">
-        <thead>
-          <tr>
-            <th onclick="sortTable(0)">代码</th>
-            <th onclick="sortTable(1)">名称</th>
-            <th onclick="sortTable(2)">所属行业</th>
-            <th onclick="sortTable(3)" class="num">股价</th>
-            <th onclick="sortTable(4)" class="num">半年线</th>
-            <th onclick="sortTable(5)" class="num">半年线乖离率</th>
-            <th onclick="sortTable(6)" class="num">股息率</th>
-            <th onclick="sortTable(7)" class="num">市盈率</th>
-            <th onclick="sortTable(8)" class="num">PE 10年分位</th>
-            <th onclick="sortTable(9)" class="num">市净率</th>
-            <th onclick="sortTable(10)" class="num">PB 10年分位</th>
-            <th onclick="sortTable(11)" class="num">总市值</th>
-            <th onclick="sortTable(12)">估值日期</th>
-            <th onclick="sortTable(13)">价格日期</th>
-          </tr>
-        </thead>
-        <tbody>{rows}</tbody>
-      </table>
-    </div>
-    <div class="foot">
-      口径说明：半年线使用最近 {config.price_window} 个交易日收盘价均值；半年线乖离率 = 现价 / 半年线 - 1；PE/PB 和历史分位仅用于参考展示，不参与筛选。该看板只做量化筛选，不构成投资建议。
-    </div>
+      {warning}
+      {empty_note}
+      <div class="table-wrap">
+        <table id="stock-table">
+          <thead>
+            <tr>
+              <th onclick="sortTable(0)">代码</th>
+              <th onclick="sortTable(1)">名称</th>
+              <th onclick="sortTable(2)">所属行业</th>
+              <th onclick="sortTable(3)" class="num">股价</th>
+              <th onclick="sortTable(4)" class="num">半年线</th>
+              <th onclick="sortTable(5)" class="num">半年线乖离率</th>
+              <th onclick="sortTable(6)" class="num">股息率</th>
+              <th onclick="sortTable(7)" class="num">市盈率</th>
+              <th onclick="sortTable(8)" class="num">PE 10年分位</th>
+              <th onclick="sortTable(9)" class="num">市净率</th>
+              <th onclick="sortTable(10)" class="num">PB 10年分位</th>
+              <th onclick="sortTable(11)" class="num">总市值</th>
+              <th onclick="sortTable(12)">估值日期</th>
+              <th onclick="sortTable(13)">价格日期</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+      <div class="foot">
+        口径说明：半年线使用最近 {config.price_window} 个交易日收盘价均值；半年线乖离率 = 现价 / 半年线 - 1；PE/PB 和历史分位仅用于参考展示，不参与筛选。该看板只做量化筛选，不构成投资建议。
+      </div>
+    </section>
+    <section id="tab-monitor" class="tab-panel" role="tabpanel">
+      <div class="monitor-head">
+        <div>
+          <h2>最近90天市场监测</h2>
+          <p>沪深300成交占比 = 沪深300成交量 / 沪深北三个市场成交量合计；融资余额增长率 = 当天融资余额 / 前一交易日融资余额 - 1。</p>
+        </div>
+        <div class="meta">
+          样本交易日：{monitor_count}<br>
+          <span id="monitor-latest">切换后显示最新值</span>
+        </div>
+      </div>
+      {monitor_warning}
+      <div class="chart-grid">
+        <section class="chart-box">
+          <div class="chart-title">
+            <span>沪深300成交占比</span>
+            <span class="chart-subtitle">单位：%</span>
+          </div>
+          <div id="volume-ratio-chart" class="chart-canvas"></div>
+        </section>
+        <section class="chart-box">
+          <div class="chart-title">
+            <span>融资余额增长率</span>
+            <span class="chart-subtitle">单位：%</span>
+          </div>
+          <div id="margin-change-chart" class="chart-canvas"></div>
+        </section>
+      </div>
+      <div class="foot">
+        市场监测口径：{monitor_source}。时间窗口使用最近 {config.monitor_days} 个自然日。
+      </div>
+    </section>
   </main>
   <script>{script}</script>
 </body>
 </html>"""
 
 
-def write_dashboard(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -> Path:
+def write_dashboard(
+    df: pd.DataFrame,
+    diagnostics: dict,
+    config: ScreenConfig,
+    market_monitor: pd.DataFrame | None = None,
+) -> Path:
     output = config.output
     output.parent.mkdir(parents=True, exist_ok=True) if output.parent != Path(".") else None
-    html_text = build_html(df, diagnostics, config)
+    html_text = build_html(df, diagnostics, config, market_monitor)
     output.write_text(html_text, encoding="utf-8")
     csv_output = output.with_suffix(".csv")
     export_cols = [
@@ -1242,6 +1769,12 @@ def write_dashboard(df: pd.DataFrame, diagnostics: dict, config: ScreenConfig) -
         if col not in export.columns:
             export[col] = None
     export[export_cols].to_csv(csv_output, index=False, encoding="utf-8-sig")
+    if market_monitor is not None and not market_monitor.empty:
+        market_monitor.to_csv(
+            output.with_name(f"{output.stem}_market_monitor.csv"),
+            index=False,
+            encoding="utf-8-sig",
+        )
     return output
 
 
@@ -1262,6 +1795,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spot-timeout", type=float, default=60.0, help="实时行情单页超时时间，默认 60 秒")
     parser.add_argument("--request-pause", type=float, default=0.0, help="估值接口每次调用前暂停秒数")
     parser.add_argument("--dividend-lookback-days", type=int, default=365, help="股息率回看天数，默认 365")
+    parser.add_argument("--monitor-days", type=int, default=90, help="市场监测自然日窗口，默认 90 天")
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 只股票，调试用")
     parser.add_argument("--refresh", action="store_true", help="忽略当日缓存，重新拉取")
     parser.add_argument("--rebuild-history", action="store_true", help="强制重建每只股票的历史库")
@@ -1285,6 +1819,7 @@ def main() -> int:
         spot_timeout=args.spot_timeout,
         request_pause=args.request_pause,
         dividend_lookback_days=args.dividend_lookback_days,
+        monitor_days=args.monitor_days,
         limit=args.limit,
         refresh=args.refresh,
         rebuild_history=args.rebuild_history,
@@ -1298,11 +1833,15 @@ def main() -> int:
     try:
         if args.demo:
             df, diagnostics = demo_screen(config)
+            market_monitor, monitor_diagnostics = demo_market_monitor(config)
         else:
             df, diagnostics = build_real_screen(config)
-        output = write_dashboard(df, diagnostics, config)
+            market_monitor, monitor_diagnostics = build_market_monitor(config)
+        diagnostics.update(monitor_diagnostics)
+        output = write_dashboard(df, diagnostics, config, market_monitor)
         log(f"看板已生成：{output.resolve()}")
         log(f"入选股票数：{len(df)}")
+        log(f"市场监测样本数：{len(market_monitor)}")
         if config.open_browser:
             webbrowser.open(output.resolve().as_uri())
         return 0

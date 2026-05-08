@@ -176,13 +176,20 @@ def percentile_rank(current: float | None, history: pd.Series) -> float | None:
     return float((values <= current).sum() / len(values) * 100)
 
 
+def read_spot_snapshot(path: Path) -> pd.DataFrame | None:
+    data_cached = read_csv(path)
+    if data_cached is None or data_cached.empty:
+        return None
+    if "代码" in data_cached.columns:
+        data_cached["代码"] = data_cached["代码"].astype(str).str.zfill(6)
+    return data_cached
+
+
 def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     data_path = config.data_dir / "spot" / f"{today_stamp()}.csv"
     if not config.refresh:
-        data_cached = read_csv(data_path)
-        if data_cached is not None and not data_cached.empty:
-            if "代码" in data_cached.columns:
-                data_cached["代码"] = data_cached["代码"].astype(str).str.zfill(6)
+        data_cached = read_spot_snapshot(data_path)
+        if data_cached is not None:
             log(f"读取当日行情库：{data_path}")
             return data_cached
 
@@ -197,9 +204,16 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
             return cached
 
     log("拉取沪深京 A 股实时行情：东方财富分页接口")
-    spot = fetch_spot_eastmoney(config)
-    if spot.empty:
-        raise RuntimeError("ak.stock_zh_a_spot_em() 返回空数据")
+    try:
+        spot = fetch_spot_eastmoney(config)
+        if spot.empty:
+            raise RuntimeError("东方财富实时行情返回空数据")
+    except Exception as exc:
+        data_cached = read_spot_snapshot(data_path)
+        if data_cached is not None:
+            log(f"实时行情拉取失败，使用当日行情库：{data_path}；错误：{exc}")
+            return data_cached
+        raise
 
     required = {"代码", "名称", "最新价"}
     missing = required.difference(spot.columns)

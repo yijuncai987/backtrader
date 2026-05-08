@@ -795,6 +795,11 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         max_workers=max(1, config.price_workers),
     )
     values = pd.DataFrame(value_rows)
+    if values.empty:
+        diagnostics["price_error_count"] = len(spot)
+        return values, diagnostics
+    if "价格估值错误" not in values.columns:
+        values["价格估值错误"] = ""
     if "代码" in values.columns:
         values["代码"] = values["代码"].astype(str).str.zfill(6)
     diagnostics["price_error_count"] = int((values["价格估值错误"].astype(str) != "").sum())

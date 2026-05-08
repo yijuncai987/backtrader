@@ -1478,6 +1478,7 @@ def build_html(
       font-weight: 500;
     }
     .chart-canvas {
+      position: relative;
       width: 100%;
       height: 292px;
     }
@@ -1496,6 +1497,30 @@ def build_html(
       border-radius: 6px;
       font-size: 13px;
     }
+    .chart-tooltip {
+      position: absolute;
+      min-width: 148px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: rgba(17, 24, 39, .92);
+      color: white;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, .22);
+      font-size: 12px;
+      line-height: 1.45;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(-50%, calc(-100% - 10px));
+      transition: opacity .12s ease;
+      z-index: 4;
+      white-space: nowrap;
+    }
+    .chart-tooltip.visible { opacity: 1; }
+    .chart-tooltip strong {
+      display: block;
+      font-size: 12px;
+      margin-bottom: 2px;
+    }
+    .chart-tooltip span { color: rgba(255,255,255,.82); }
     .foot {
       margin-top: 16px;
       color: var(--muted);
@@ -1604,6 +1629,7 @@ def build_html(
       max += pad;
       const x = index => margin.left + index * (width - margin.left - margin.right) / (points.length - 1);
       const y = value => margin.top + (max - Number(value)) * (height - margin.top - margin.bottom) / (max - min);
+      const step = (width - margin.left - margin.right) / (points.length - 1);
       const line = points.map((p, index) => `${x(index).toFixed(2)},${y(p.value).toFixed(2)}`).join(' ');
       const yTicks = Array.from({ length: 5 }, (_, index) => min + (max - min) * index / 4);
       const xTickIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1]));
@@ -1625,7 +1651,38 @@ def build_html(
         <polyline fill="none" stroke="${color}" stroke-width="2.5" points="${line}"/>
         ${dots}
         ${xLabels}
-      </svg>`;
+        <line class="hover-guide" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}" stroke="#98a2b3" stroke-dasharray="4 4" opacity="0"/>
+        <circle class="hover-dot" cx="${margin.left}" cy="${margin.top}" r="5" fill="${color}" stroke="white" stroke-width="2" opacity="0"/>
+      </svg><div class="chart-tooltip" role="status" aria-live="polite"></div>`;
+      const svg = target.querySelector('svg');
+      const tooltip = target.querySelector('.chart-tooltip');
+      const guide = target.querySelector('.hover-guide');
+      const hoverDot = target.querySelector('.hover-dot');
+      const hideTooltip = () => {
+        tooltip.classList.remove('visible');
+        guide.setAttribute('opacity', '0');
+        hoverDot.setAttribute('opacity', '0');
+      };
+      const showTooltip = event => {
+        const rect = svg.getBoundingClientRect();
+        const svgX = (event.clientX - rect.left) * width / rect.width;
+        const nearest = Math.max(0, Math.min(points.length - 1, Math.round((svgX - margin.left) / step)));
+        const point = points[nearest];
+        const cx = x(nearest);
+        const cy = y(point.value);
+        guide.setAttribute('x1', cx.toFixed(2));
+        guide.setAttribute('x2', cx.toFixed(2));
+        guide.setAttribute('opacity', '1');
+        hoverDot.setAttribute('cx', cx.toFixed(2));
+        hoverDot.setAttribute('cy', cy.toFixed(2));
+        hoverDot.setAttribute('opacity', '1');
+        tooltip.innerHTML = `<strong>${point.date}</strong><span>${key}：${formatNumber(point.value, 2, unit)}</span>`;
+        tooltip.style.left = `${cx / width * rect.width}px`;
+        tooltip.style.top = `${cy / height * rect.height}px`;
+        tooltip.classList.add('visible');
+      };
+      target.addEventListener('pointermove', showTooltip);
+      target.addEventListener('pointerleave', hideTooltip);
     }
     function renderMarketCharts() {
       if (monitorRendered) return;

@@ -1184,7 +1184,7 @@ def build_margin_change_monitor(config: ScreenConfig) -> pd.DataFrame:
     merged["深圳融资余额"] = pd.to_numeric(merged["深圳融资余额"], errors="coerce")
     merged["融资余额"] = merged[["上海融资余额", "深圳融资余额"]].sum(axis=1, min_count=2)
     merged = merged[merged["融资余额"].notna()].sort_values("日期").copy()
-    merged["融资余额增长率"] = merged["融资余额"].pct_change() * 100
+    merged["融资余额增长率"] = merged["融资余额"].pct_change(periods=5) * 100
     return merged[["日期", "融资余额", "融资余额增长率"]]
 
 
@@ -1192,7 +1192,7 @@ def build_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     start, _ = monitor_date_window(config)
     diagnostics = {
         "market_monitor_error": "",
-        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指 + 北交所个股成交量汇总)；融资余额：上海 + 深圳两市融资余额",
+        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指 + 北交所个股成交量汇总)；融资余额：上海 + 深圳两市融资余额；融资余额5日涨幅：当天融资余额 / 5个交易日前融资余额 - 1",
     }
     pieces = []
     errors = []
@@ -1242,12 +1242,15 @@ def demo_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
                     "市场总成交量": 1_500_000_000 + idx * 2_000_000,
                     "沪深300成交占比": ratio,
                     "融资余额": balance,
-                    "融资余额增长率": daily_change,
+                    "融资余额增长率": None,
                 }
             )
             idx += 1
         current += timedelta(days=1)
-    return pd.DataFrame(rows), {
+    demo = pd.DataFrame(rows)
+    if not demo.empty:
+        demo["融资余额增长率"] = demo["融资余额"].pct_change(periods=5) * 100
+    return demo, {
         "market_monitor_error": "",
         "market_monitor_count": len(rows),
         "market_monitor_source": "演示数据",
@@ -1776,12 +1779,12 @@ def build_html(
     function renderMarketCharts() {
       if (monitorRendered) return;
       renderLineChart('volume-ratio-chart', '沪深300成交占比', '%', '#0f766e');
-      renderLineChart('margin-change-chart', '融资余额增长率', '%', '#2563eb');
+      renderLineChart('margin-change-chart', '融资余额5日涨幅', '%', '#2563eb');
       const latest = [...marketMonitorData].reverse().find(row => row['沪深300成交占比'] !== null || row['融资余额增长率'] !== null);
       if (latest) {
         const latestNode = document.getElementById('monitor-latest');
         if (latestNode) {
-          latestNode.textContent = `最新 ${latest['日期']}：成交占比 ${formatNumber(latest['沪深300成交占比'], 2, '%')}，融资余额增长率 ${formatNumber(latest['融资余额增长率'], 2, '%')}`;
+          latestNode.textContent = `最新 ${latest['日期']}：成交占比 ${formatNumber(latest['沪深300成交占比'], 2, '%')}，融资余额5日涨幅 ${formatNumber(latest['融资余额增长率'], 2, '%')}`;
         }
       }
       monitorRendered = true;
@@ -1861,7 +1864,7 @@ def build_html(
       <div class="monitor-head">
         <div>
           <h2>最近90天市场监测</h2>
-          <p>沪深300成交占比 = 沪深300成交量 / 沪深北三个市场成交量合计；融资余额增长率 = 当天融资余额 / 前一交易日融资余额 - 1。</p>
+          <p>沪深300成交占比 = 沪深300成交量 / 沪深北三个市场成交量合计；融资余额5日涨幅 = 当天融资余额 / 5个交易日前融资余额 - 1。</p>
         </div>
         <div class="meta">
           样本交易日：{monitor_count}<br>
@@ -1879,7 +1882,7 @@ def build_html(
         </section>
         <section class="chart-box">
           <div class="chart-title">
-            <span>融资余额增长率</span>
+            <span>融资余额5日涨幅</span>
             <span class="chart-subtitle">单位：%</span>
           </div>
           <div id="margin-change-chart" class="chart-canvas"></div>

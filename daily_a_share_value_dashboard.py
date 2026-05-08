@@ -1486,7 +1486,9 @@ def build_html(
       background: white;
       border: 1px solid var(--line);
       border-radius: 8px;
+      max-height: calc(100vh - 96px);
       overflow: auto;
+      scrollbar-gutter: stable;
       box-shadow: 0 8px 22px rgba(20, 30, 50, .05);
     }
     table {
@@ -1505,8 +1507,9 @@ def build_html(
     th {
       position: sticky;
       top: 0;
-      z-index: 2;
+      z-index: 5;
       background: #f8fafc;
+      box-shadow: 0 1px 0 #d8dee9;
       color: #344054;
       font-size: 12px;
       font-weight: 700;

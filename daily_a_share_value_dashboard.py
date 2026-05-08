@@ -885,6 +885,15 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     diagnostics["price_error_count"] = int((values["价格估值错误"].astype(str) != "").sum())
 
     merged = spot.merge(values, on="代码", how="left")
+    if "市净率_y" in merged.columns or "市净率_x" in merged.columns:
+        valuation_pb = merged.get("市净率_y")
+        spot_pb = merged.get("市净率_x")
+        if valuation_pb is not None and spot_pb is not None:
+            merged["市净率"] = valuation_pb.combine_first(spot_pb)
+        elif valuation_pb is not None:
+            merged["市净率"] = valuation_pb
+        elif spot_pb is not None:
+            merged["市净率"] = spot_pb
     if "总市值_估值源" in merged.columns:
         merged["总市值"] = merged["总市值_估值源"].combine_first(merged.get("总市值"))
 

@@ -909,12 +909,20 @@ def fetch_market_index_history(symbol: str, label: str, config: ScreenConfig) ->
         if cached is not None and not cached.empty:
             return cached
 
-    df = ak.index_zh_a_hist(
-        symbol=symbol,
-        period="daily",
-        start_date=start.strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"),
-    )
+    em_symbol = f"sz{symbol}" if symbol.startswith("399") else f"sh{symbol}"
+    try:
+        df = ak.stock_zh_index_daily_em(
+            symbol=em_symbol,
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        )
+    except Exception:
+        df = ak.index_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        )
     if df is None or df.empty:
         raise RuntimeError(f"{label}({symbol}) 指数历史为空")
 

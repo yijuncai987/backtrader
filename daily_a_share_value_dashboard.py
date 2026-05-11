@@ -45,14 +45,17 @@ class ScreenConfig:
     min_dividend_yield_pct: float = 3.0
     valuation_years: int = 10
     max_percentile: float = 30.0
-    price_workers: int = 8
-    valuation_workers: int = 3
-    industry_workers: int = 6
-    spot_workers: int = 8
+    price_workers: int = 4
+    valuation_workers: int = 1
+    industry_workers: int = 3
+    spot_workers: int = 4
     spot_timeout: float = 60.0
     dividend_lookback_days: int = 365
     monitor_days: int = 90
-    request_pause: float = 0.0
+    request_pause: float = 0.5
+    request_retries: int = 3
+    retry_backoff: float = 1.5
+    failed_item_retries: int = 1
     limit: int | None = None
     refresh: bool = False
     rebuild_history: bool = False
@@ -83,6 +86,7 @@ def ensure_data_dir(data_dir: Path) -> None:
     (data_dir / "industry").mkdir(exist_ok=True)
     (data_dir / "screening_results").mkdir(exist_ok=True)
     (data_dir / "market_monitor").mkdir(exist_ok=True)
+    (data_dir / "failures").mkdir(exist_ok=True)
 
 
 def today_stamp() -> str:
@@ -176,6 +180,28 @@ def percentile_rank(current: float | None, history: pd.Series) -> float | None:
     return float((values <= current).sum() / len(values) * 100)
 
 
+def retry_delay_seconds(config: ScreenConfig, attempt: int) -> float:
+    base_delay = max(float(config.request_pause), 0.2)
+    backoff = max(float(config.retry_backoff), 1.0)
+    return min(base_delay * (backoff ** max(0, attempt - 1)), 10.0)
+
+
+def fetch_with_retries(label: str, config: ScreenConfig, fetcher: Callable):
+    attempts = max(1, int(config.request_retries) + 1)
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        if config.request_pause > 0:
+            time.sleep(config.request_pause)
+        try:
+            return fetcher()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            time.sleep(retry_delay_seconds(config, attempt))
+    raise RuntimeError(f"{label}失败，已尝试 {attempts} 次：{last_error}") from last_error
+
+
 def read_spot_snapshot(path: Path) -> pd.DataFrame | None:
     data_cached = read_csv(path)
     if data_cached is None or data_cached.empty:
@@ -227,7 +253,7 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     return spot
 
 
-def fetch_spot_page(page: int, page_size: int, timeout: float) -> tuple[int, list[dict]]:
+def fetch_spot_page(page: int, page_size: int, config: ScreenConfig) -> tuple[int, list[dict]]:
     url = "https://82.push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": str(page),
@@ -245,21 +271,25 @@ def fetch_spot_page(page: int, page_size: int, timeout: float) -> tuple[int, lis
         ),
     }
     last_error = None
-    for _ in range(3):
+    attempts = max(1, int(config.request_retries) + 1)
+    for attempt in range(1, attempts + 1):
         try:
-            response = requests.get(url, params=params, timeout=timeout)
+            if config.request_pause > 0:
+                time.sleep(config.request_pause)
+            response = requests.get(url, params=params, timeout=config.spot_timeout)
             response.raise_for_status()
             data = response.json().get("data") or {}
             return int(data.get("total") or 0), data.get("diff") or []
         except Exception as exc:
             last_error = exc
-            time.sleep(1)
+            if attempt < attempts:
+                time.sleep(retry_delay_seconds(config, attempt))
     raise RuntimeError(f"东方财富行情第 {page} 页失败：{last_error}")
 
 
 def fetch_spot_eastmoney(config: ScreenConfig) -> pd.DataFrame:
     page_size = 100
-    total, first_rows = fetch_spot_page(1, page_size, config.spot_timeout)
+    total, first_rows = fetch_spot_page(1, page_size, config)
     if total <= 0 or not first_rows:
         raise RuntimeError("东方财富行情接口返回空数据")
 
@@ -270,7 +300,7 @@ def fetch_spot_eastmoney(config: ScreenConfig) -> pd.DataFrame:
         page_numbers = list(range(2, pages + 1))
         with ThreadPoolExecutor(max_workers=max(1, config.spot_workers)) as executor:
             future_map = {
-                executor.submit(fetch_spot_page, page, page_size, config.spot_timeout): page
+                executor.submit(fetch_spot_page, page, page_size, config): page
                 for page in page_numbers
             }
             for idx, future in enumerate(as_completed(future_map), start=1):
@@ -320,12 +350,13 @@ def fetch_baidu_valuation_history(symbol: str, indicator: str, config: ScreenCon
         if cached is not None and not cached.empty:
             return cached
 
-    if config.request_pause > 0:
-        time.sleep(config.request_pause)
+    def load() -> pd.DataFrame:
+        df = ak.stock_zh_valuation_baidu(symbol=symbol, indicator=indicator, period="近十年")
+        if df is None or df.empty:
+            raise RuntimeError("估值历史为空")
+        return df
 
-    df = ak.stock_zh_valuation_baidu(symbol=symbol, indicator=indicator, period="近十年")
-    if df.empty:
-        raise RuntimeError("估值历史为空")
+    df = fetch_with_retries(f"{symbol} {indicator}估值历史", config, load)
     write_csv_cache(df, cache_path)
     return df
 
@@ -337,9 +368,13 @@ def fetch_value_history_em(symbol: str, config: ScreenConfig) -> pd.DataFrame:
         if cached is not None and not cached.empty:
             return cached
 
-    df = ak.stock_value_em(symbol=symbol)
-    if df.empty:
-        raise RuntimeError("东方财富估值分析为空")
+    def load() -> pd.DataFrame:
+        df = ak.stock_value_em(symbol=symbol)
+        if df is None or df.empty:
+            raise RuntimeError("东方财富估值分析为空")
+        return df
+
+    df = fetch_with_retries(f"{symbol} 东方财富估值分析", config, load)
     write_csv_cache(df, cache_path)
     return df
 
@@ -447,10 +482,11 @@ def fetch_dividend_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
             write_csv(cached, data_path)
             return cached
 
-    if config.request_pause > 0:
-        time.sleep(config.request_pause)
-
-    df = ak.stock_dividend_cninfo(symbol=symbol)
+    df = fetch_with_retries(
+        f"{symbol} 股息历史",
+        config,
+        lambda: ak.stock_dividend_cninfo(symbol=symbol),
+    )
     if df is None:
         df = pd.DataFrame()
     write_csv_cache(df, cache_path)
@@ -581,16 +617,20 @@ def fetch_price_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
 
     end = date.today()
     start = end - timedelta(days=max(420, config.price_window * 3))
-    df = ak.stock_zh_a_hist(
-        symbol=symbol,
-        period="daily",
-        start_date=start.strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"),
-        adjust="",
-        timeout=15,
-    )
-    if df.empty:
-        raise RuntimeError("价格历史为空")
+    def load() -> pd.DataFrame:
+        df = ak.stock_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust="",
+            timeout=15,
+        )
+        if df is None or df.empty:
+            raise RuntimeError("价格历史为空")
+        return df
+
+    df = fetch_with_retries(f"{symbol} 价格历史", config, load)
     write_csv_cache(df, cache_path)
     return df
 
@@ -757,9 +797,14 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             "估值分位达标": pe_pass or pb_pass,
             "估值数据日期": valuation_date,
             "总市值_估值源": market_cap,
+            "价格错误": "",
+            "估值错误": metric_error[:300],
             "价格估值错误": metric_error[:300],
+            "数据状态": "估值缺失" if metric_error else "正常",
         }
     except Exception as exc:
+        error = str(exc)[:300]
+        status = "历史不足" if "历史交易日不足" in error else "价格失败"
         return {
             "代码": symbol,
             "现价": latest_price,
@@ -774,7 +819,10 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             "估值分位达标": False,
             "估值数据日期": "",
             "总市值_估值源": None,
-            "价格估值错误": str(exc)[:300],
+            "价格错误": error,
+            "估值错误": "",
+            "价格估值错误": error,
+            "数据状态": status,
         }
 
 
@@ -815,9 +863,13 @@ def industry_for_symbol(symbol: str, config: ScreenConfig) -> dict:
             return {"代码": symbol, "所属行业": str(cached.iloc[0]["所属行业"]), "行业错误": ""}
 
     try:
-        df = ak.stock_individual_info_em(symbol=symbol, timeout=10)
-        if df.empty or not {"item", "value"}.issubset(df.columns):
-            raise RuntimeError("个股信息为空或字段异常")
+        def load() -> pd.DataFrame:
+            df = ak.stock_individual_info_em(symbol=symbol, timeout=10)
+            if df is None or df.empty or not {"item", "value"}.issubset(df.columns):
+                raise RuntimeError("个股信息为空或字段异常")
+            return df
+
+        df = fetch_with_retries(f"{symbol} 个股信息", config, load)
         industry_rows = df[df["item"].astype(str) == "行业"]
         industry = str(industry_rows.iloc[0]["value"]) if not industry_rows.empty else "未知"
         write_csv_cache(pd.DataFrame([{"所属行业": industry}]), cache_path)
@@ -853,6 +905,104 @@ def is_st_stock_name(name) -> bool:
     return normalized.startswith(("ST", "*ST", "SST", "S*ST"))
 
 
+def has_text(value) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    text = str(value).strip()
+    return text not in {"", "nan", "NaN", "None"}
+
+
+def is_retryable_stock_error(error) -> bool:
+    if not has_text(error):
+        return False
+    text = str(error)
+    permanent_markers = ("历史交易日不足", "估值字段仍缺失", "字段缺失")
+    return not any(marker in text for marker in permanent_markers)
+
+
+def ensure_price_valuation_columns(values: pd.DataFrame) -> pd.DataFrame:
+    values = values.copy()
+    for col in ["价格错误", "估值错误", "价格估值错误", "数据状态"]:
+        if col not in values.columns:
+            values[col] = ""
+    values["价格错误"] = values["价格错误"].fillna("")
+    values["估值错误"] = values["估值错误"].fillna("")
+    values["价格估值错误"] = values["价格估值错误"].fillna("")
+    values["数据状态"] = values["数据状态"].fillna("")
+    return values
+
+
+def retry_price_valuation_failures(
+    spot: pd.DataFrame,
+    values: pd.DataFrame,
+    config: ScreenConfig,
+) -> tuple[pd.DataFrame, int]:
+    values = ensure_price_valuation_columns(values)
+    retry_rounds = max(0, int(config.failed_item_retries))
+    retried_count = 0
+    for retry_idx in range(retry_rounds):
+        retry_codes = set(
+            values.loc[values["价格错误"].map(is_retryable_stock_error), "代码"]
+            .astype(str)
+            .str.zfill(6)
+        )
+        if not retry_codes:
+            break
+        retry_rows = [row for _, row in spot[spot["代码"].isin(retry_codes)].iterrows()]
+        if not retry_rows:
+            break
+        log(f"价格/估值失败股票重试：{len(retry_rows)} 条，第 {retry_idx + 1}/{retry_rounds} 轮")
+        retry_values = pd.DataFrame(
+            parallel_map(
+                "价格/估值重试",
+                retry_rows,
+                lambda row: price_valuation_metrics(row, config),
+                max_workers=1,
+            )
+        )
+        if retry_values.empty:
+            break
+        retry_values = ensure_price_valuation_columns(retry_values)
+        retried_count += len(retry_values)
+        retry_values["代码"] = retry_values["代码"].astype(str).str.zfill(6)
+        values = pd.concat(
+            [values[~values["代码"].isin(retry_codes)], retry_values],
+            ignore_index=True,
+        )
+    return values, retried_count
+
+
+def add_failure_records(records: list[dict], df: pd.DataFrame, stage: str, error_col: str) -> None:
+    if df.empty or error_col not in df.columns:
+        return
+    for _, row in df[df[error_col].map(has_text)].iterrows():
+        error = str(row.get(error_col, ""))[:500]
+        records.append(
+            {
+                "日期": date.today().isoformat(),
+                "阶段": stage,
+                "代码": str(row.get("代码", "")).zfill(6),
+                "名称": str(row.get("名称", "")),
+                "错误": error,
+                "建议重试": "是" if is_retryable_stock_error(error) else "否",
+            }
+        )
+
+
+def write_failure_report(records: list[dict], config: ScreenConfig, diagnostics: dict) -> None:
+    if not records:
+        return
+    report = pd.DataFrame(records).drop_duplicates()
+    report_path = config.data_dir / "failures" / f"{today_stamp()}.csv"
+    write_csv(report, report_path)
+    diagnostics["failure_report_path"] = str(report_path)
+
+
 def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     ensure_cache_dir(config.cache_dir)
     ensure_data_dir(config.data_dir)
@@ -872,13 +1022,18 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         "st_excluded_count": st_excluded_count,
         "valuation_error_count": 0,
         "price_error_count": 0,
+        "valuation_incomplete_count": 0,
+        "history_short_count": 0,
+        "price_retry_count": 0,
         "dividend_error_count": 0,
         "industry_error_count": 0,
         "valuation_prefilter_count": 0,
         "price_prefilter_count": 0,
+        "failure_report_path": "",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "mode": "真实数据",
     }
+    failure_records: list[dict] = []
 
     value_rows = parallel_map(
         "半年线与估值",
@@ -890,11 +1045,22 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     if values.empty:
         diagnostics["price_error_count"] = len(spot)
         return values, diagnostics
-    if "价格估值错误" not in values.columns:
-        values["价格估值错误"] = ""
+    values = ensure_price_valuation_columns(values)
     if "代码" in values.columns:
         values["代码"] = values["代码"].astype(str).str.zfill(6)
-    diagnostics["price_error_count"] = int((values["价格估值错误"].astype(str) != "").sum())
+    values, retried_count = retry_price_valuation_failures(spot, values, config)
+    diagnostics["price_retry_count"] = retried_count
+    diagnostics["price_error_count"] = int(values["价格错误"].map(has_text).sum())
+    diagnostics["valuation_incomplete_count"] = int(values["估值错误"].map(has_text).sum())
+    diagnostics["history_short_count"] = int(values["价格错误"].astype(str).str.contains("历史交易日不足", regex=False).sum())
+
+    value_failure_source = spot[["代码", "名称"]].merge(
+        values[["代码", "价格错误", "估值错误", "数据状态"]],
+        on="代码",
+        how="left",
+    )
+    add_failure_records(failure_records, value_failure_source, "价格/历史", "价格错误")
+    add_failure_records(failure_records, value_failure_source, "估值字段", "估值错误")
 
     merged = spot.merge(values, on="代码", how="left")
     if "市净率_y" in merged.columns or "市净率_x" in merged.columns:
@@ -913,6 +1079,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     diagnostics["price_prefilter_count"] = len(price_prefiltered)
 
     if price_prefiltered.empty:
+        write_failure_report(failure_records, config, diagnostics)
         return price_prefiltered, diagnostics
 
     dividend_rows = parallel_map(
@@ -924,7 +1091,13 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     dividends = pd.DataFrame(dividend_rows)
     if "代码" in dividends.columns:
         dividends["代码"] = dividends["代码"].astype(str).str.zfill(6)
-    diagnostics["dividend_error_count"] = int((dividends["股息错误"].astype(str) != "").sum())
+    diagnostics["dividend_error_count"] = int(dividends["股息错误"].map(has_text).sum())
+    dividend_failure_source = price_prefiltered[["代码", "名称"]].merge(
+        dividends[["代码", "股息错误"]],
+        on="代码",
+        how="left",
+    )
+    add_failure_records(failure_records, dividend_failure_source, "股息", "股息错误")
 
     merged = price_prefiltered.merge(dividends, on="代码", how="left")
     final_df = merged[merged["股息率达标"] == True].copy()
@@ -938,10 +1111,17 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     )
     if industry_rows:
         industry = pd.DataFrame(industry_rows)
-        diagnostics["industry_error_count"] = int((industry["行业错误"].astype(str) != "").sum())
+        diagnostics["industry_error_count"] = int(industry["行业错误"].map(has_text).sum())
+        industry_failure_source = final_df[["代码", "名称"]].merge(
+            industry[["代码", "行业错误"]],
+            on="代码",
+            how="left",
+        )
+        add_failure_records(failure_records, industry_failure_source, "行业", "行业错误")
         final_df = final_df.merge(industry, on="代码", how="left")
     else:
         final_df["所属行业"] = ""
+    write_failure_report(failure_records, config, diagnostics)
     result_path = config.data_dir / "screening_results" / f"{today_stamp()}.csv"
     write_csv(final_df, result_path)
     return final_df, diagnostics
@@ -986,10 +1166,14 @@ def demo_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         "universe_count": 2,
         "valuation_error_count": 0,
         "price_error_count": 0,
+        "valuation_incomplete_count": 0,
+        "history_short_count": 0,
+        "price_retry_count": 0,
         "dividend_error_count": 0,
         "industry_error_count": 0,
         "valuation_prefilter_count": 2,
         "price_prefilter_count": 2,
+        "failure_report_path": "",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "mode": "演示数据",
     }
@@ -1011,21 +1195,25 @@ def fetch_market_index_history(symbol: str, label: str, config: ScreenConfig) ->
             return cached
 
     em_symbol = f"sz{symbol}" if symbol.startswith("399") else f"sh{symbol}"
-    try:
-        df = ak.stock_zh_index_daily_em(
-            symbol=em_symbol,
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-        )
-    except Exception:
-        df = ak.index_zh_a_hist(
-            symbol=symbol,
-            period="daily",
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-        )
-    if df is None or df.empty:
-        raise RuntimeError(f"{label}({symbol}) 指数历史为空")
+    def load() -> pd.DataFrame:
+        try:
+            df = ak.stock_zh_index_daily_em(
+                symbol=em_symbol,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            )
+        except Exception:
+            df = ak.index_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            )
+        if df is None or df.empty:
+            raise RuntimeError(f"{label}({symbol}) 指数历史为空")
+        return df
+
+    df = fetch_with_retries(f"{label}({symbol}) 指数历史", config, load)
 
     date_col = pick_column(df.columns, ["日期", "date"])
     volume_col = pick_column(df.columns, ["成交量", "volume"])
@@ -1054,13 +1242,17 @@ def fetch_bj_stock_history_for_volume(symbol: str, config: ScreenConfig) -> pd.D
             return cached
 
     try:
-        df = ak.stock_zh_a_hist(
-            symbol=symbol,
-            period="daily",
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-            adjust="",
-            timeout=15,
+        df = fetch_with_retries(
+            f"{symbol} 北交所成交量",
+            config,
+            lambda: ak.stock_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust="",
+                timeout=15,
+            ),
         )
         if df is None or df.empty:
             return pd.DataFrame(columns=["日期", "北交所成交量"])
@@ -1090,9 +1282,13 @@ def fetch_bj_market_volume_history(config: ScreenConfig) -> pd.DataFrame:
         if cached is not None and not cached.empty:
             return cached
 
-    codes_df = ak.stock_info_bj_name_code()
-    if codes_df is None or codes_df.empty:
-        raise RuntimeError("北交所股票列表为空")
+    def load_codes() -> pd.DataFrame:
+        codes_df = ak.stock_info_bj_name_code()
+        if codes_df is None or codes_df.empty:
+            raise RuntimeError("北交所股票列表为空")
+        return codes_df
+
+    codes_df = fetch_with_retries("北交所股票列表", config, load_codes)
     code_col = pick_column(codes_df.columns, ["证券代码", "代码", "股票代码"])
     if code_col is None:
         raise RuntimeError("北交所股票列表缺少代码字段")
@@ -1157,9 +1353,13 @@ def fetch_margin_macro_history(name: str, fetcher: Callable[[], pd.DataFrame], c
         if cached is not None and not cached.empty:
             return cached
 
-    df = fetcher()
-    if df is None or df.empty:
-        raise RuntimeError(f"{name} 融资融券历史为空")
+    def load() -> pd.DataFrame:
+        df = fetcher()
+        if df is None or df.empty:
+            raise RuntimeError(f"{name} 融资融券历史为空")
+        return df
+
+    df = fetch_with_retries(f"{name} 融资融券历史", config, load)
     write_csv_cache(df, cache_path)
     return df
 
@@ -1356,10 +1556,21 @@ def build_html(
         )
 
     warning = ""
-    if any(int(diagnostics.get(key, 0)) > 0 for key in ["valuation_error_count", "price_error_count", "dividend_error_count", "industry_error_count"]):
+    failure_report_path = str(diagnostics.get("failure_report_path", ""))
+    failure_report_hint = f" 失败清单：{html.escape(failure_report_path)}。" if failure_report_path else ""
+    if any(int(diagnostics.get(key, 0)) > 0 for key in ["price_error_count", "dividend_error_count", "industry_error_count"]):
         warning = (
             "<div class='warning'>"
-            "有部分股票数据获取失败。AKShare 依赖外部网站，建议稍后重跑，或升级 AKShare 后使用缓存续跑。"
+            "已自动重试，仍有部分股票因接口返回空、历史不足或字段缺失未补全。"
+            "AKShare 依赖外部网站，后续可用缓存继续补跑。"
+            f"{failure_report_hint}"
+            "</div>"
+        )
+    elif int(diagnostics.get("valuation_incomplete_count", 0)) > 0:
+        warning = (
+            "<div class='warning'>"
+            "部分股票估值字段缺失，但价格与股息筛选仍可继续；PE/PB 分位仅用于参考展示。"
+            f"{failure_report_hint}"
             "</div>"
         )
 
@@ -1843,7 +2054,7 @@ def build_html(
         <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
         <div class="meta">
           生成时间：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
-          价格预筛：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格/估值数据失败：{diagnostics.get("price_error_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}
+          价格预筛：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格失败：{diagnostics.get("price_error_count", 0)}；历史不足：{diagnostics.get("history_short_count", 0)}；估值缺失：{diagnostics.get("valuation_incomplete_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}；重试股票：{diagnostics.get("price_retry_count", 0)}
         </div>
       </div>
       {warning}
@@ -1965,12 +2176,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-below-ma-pct", type=float, default=-10.0, help="现价相对半年线最大乖离率，默认 -10")
     parser.add_argument("--min-dividend-yield-pct", type=float, default=3.0, help="最低股息率，默认 3")
     parser.add_argument("--max-percentile", type=float, default=30.0, help="PE/PB 最高历史分位，默认 30")
-    parser.add_argument("--valuation-workers", type=int, default=3, help="估值接口并发数，默认 3")
-    parser.add_argument("--price-workers", type=int, default=8, help="价格接口并发数，默认 8")
-    parser.add_argument("--industry-workers", type=int, default=6, help="行业接口并发数，默认 6")
-    parser.add_argument("--spot-workers", type=int, default=8, help="实时行情分页并发数，默认 8")
+    parser.add_argument("--valuation-workers", type=int, default=1, help="估值和股息接口并发数，默认 1，优先稳定")
+    parser.add_argument("--price-workers", type=int, default=4, help="价格/历史接口并发数，默认 4，优先稳定")
+    parser.add_argument("--industry-workers", type=int, default=3, help="行业接口并发数，默认 3")
+    parser.add_argument("--spot-workers", type=int, default=4, help="实时行情分页并发数，默认 4")
     parser.add_argument("--spot-timeout", type=float, default=60.0, help="实时行情单页超时时间，默认 60 秒")
-    parser.add_argument("--request-pause", type=float, default=0.0, help="估值接口每次调用前暂停秒数")
+    parser.add_argument("--request-pause", type=float, default=0.5, help="外部接口每次调用前暂停秒数，默认 0.5")
+    parser.add_argument("--request-retries", type=int, default=3, help="外部接口失败后的重试次数，默认 3")
+    parser.add_argument("--retry-backoff", type=float, default=1.5, help="接口重试等待时间倍率，默认 1.5")
+    parser.add_argument("--failed-item-retries", type=int, default=1, help="批量结束后对失败股票额外重试轮数，默认 1")
     parser.add_argument("--dividend-lookback-days", type=int, default=365, help="股息率回看天数，默认 365")
     parser.add_argument("--monitor-days", type=int, default=90, help="市场监测自然日窗口，默认 90 天")
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 只股票，调试用")
@@ -1995,6 +2209,9 @@ def main() -> int:
         spot_workers=args.spot_workers,
         spot_timeout=args.spot_timeout,
         request_pause=args.request_pause,
+        request_retries=args.request_retries,
+        retry_backoff=args.retry_backoff,
+        failed_item_retries=args.failed_item_retries,
         dividend_lookback_days=args.dividend_lookback_days,
         monitor_days=args.monitor_days,
         limit=args.limit,

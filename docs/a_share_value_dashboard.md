@@ -101,9 +101,12 @@ cache/a_share_value_dashboard/
 ```bash
 python daily_a_share_value_dashboard.py ^
   --data-dir data/a_share ^
-  --price-workers 12 ^
-  --valuation-workers 3 ^
-  --spot-workers 8 ^
+  --price-workers 4 ^
+  --valuation-workers 1 ^
+  --spot-workers 4 ^
+  --request-pause 0.5 ^
+  --request-retries 3 ^
+  --failed-item-retries 1 ^
   --price-window 120 ^
   --max-below-ma-pct -10 ^
   --min-dividend-yield-pct 3 ^
@@ -113,13 +116,25 @@ python daily_a_share_value_dashboard.py ^
 
 `--max-percentile` 当前只影响页面展示的分位计算阈值说明兼容项，不再作为筛选条件。
 
-如果接口不稳定，可以降低并发或增加暂停：
+默认配置已经偏向“慢但稳”：降低并发、每次外部请求前暂停、接口失败后自动重试，并在批量结束后对失败股票额外补跑一轮。仍未补上的股票会写入：
+
+```text
+data/a_share/failures/YYYYMMDD.csv
+```
+
+如果临时想进一步放慢，可以继续降低并发或增加暂停：
 
 ```bash
-python daily_a_share_value_dashboard.py --valuation-workers 1 --request-pause 0.5
+python daily_a_share_value_dashboard.py --price-workers 2 --valuation-workers 1 --request-pause 1
 ```
 
 ## 已验证
+
+2026-05-11 本地验证结果：
+
+- `python -m py_compile daily_a_share_value_dashboard.py`：通过。
+- `python -m pytest tests\test_daily_a_share_value_dashboard.py -q`：5 个测试通过。
+- `python daily_a_share_value_dashboard.py --demo --output %TEMP%\a_share_value_dashboard_smoke.html`：成功生成演示面板。
 
 2026-05-08 本地验证结果：
 

@@ -1,5 +1,6 @@
 import json
 
+import pandas as pd
 import pytest
 
 
@@ -12,6 +13,7 @@ from daily_a_share_value_dashboard import (  # noqa: E402
     demo_screen,
     monitor_date_window,
     monitor_records_for_html,
+    normalize_spot_akshare_fallback,
 )
 
 
@@ -49,6 +51,21 @@ def test_default_live_fetching_prefers_stability():
     assert config.request_pause == 0.5
     assert config.request_retries == 3
     assert config.failed_item_retries == 1
+
+
+def test_normalize_spot_akshare_fallback_strips_market_prefixes():
+    raw = pd.DataFrame(
+        [
+            {"代码": "bj920000", "名称": "安徽凤凰", "最新价": "16.24", "涨跌幅": "-1.63"},
+            {"代码": "sh600000", "名称": "浦发银行", "最新价": "8.12", "涨跌幅": "0.1"},
+            {"代码": "sz000001", "名称": "平安银行", "最新价": "9.82", "涨跌幅": "0.2"},
+        ]
+    )
+
+    normalized = normalize_spot_akshare_fallback(raw)
+
+    assert normalized["代码"].tolist() == ["920000", "600000", "000001"]
+    assert normalized["最新价"].tolist() == [16.24, 8.12, 9.82]
 
 
 def test_build_html_separates_price_errors_from_valuation_gaps():

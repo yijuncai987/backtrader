@@ -122,6 +122,8 @@ python daily_a_share_value_dashboard.py ^
 data/a_share/failures/YYYYMMDD.csv
 ```
 
+如果东方财富分页行情接口中途断开，脚本会自动切换到 AKShare 的备用实时行情接口继续生成当天快照。备用行情源字段更少，缺少当天 PE/PB 时会沿用本地历史库里最近一个非空估值用于展示和分位计算。
+
 如果临时想进一步放慢，可以继续降低并发或增加暂停：
 
 ```bash

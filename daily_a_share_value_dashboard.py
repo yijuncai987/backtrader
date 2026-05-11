@@ -235,11 +235,19 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
         if spot.empty:
             raise RuntimeError("东方财富实时行情返回空数据")
     except Exception as exc:
-        data_cached = read_spot_snapshot(data_path)
-        if data_cached is not None:
-            log(f"实时行情拉取失败，使用当日行情库：{data_path}；错误：{exc}")
-            return data_cached
-        raise
+        log(f"东方财富分页行情拉取失败，尝试 AKShare 备用实时行情接口；错误：{exc}")
+        try:
+            spot = fetch_spot_akshare_fallback(config)
+            if spot.empty:
+                raise RuntimeError("AKShare 备用实时行情返回空数据")
+            log(f"AKShare 备用实时行情可用：{len(spot)} 条")
+        except Exception as fallback_exc:
+            log(f"AKShare 备用实时行情也失败：{fallback_exc}")
+            data_cached = read_spot_snapshot(data_path)
+            if data_cached is not None:
+                log(f"实时行情拉取失败，使用当日行情库：{data_path}；错误：{exc}")
+                return data_cached
+            raise
 
     required = {"代码", "名称", "最新价"}
     missing = required.difference(spot.columns)
@@ -251,6 +259,49 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     write_csv_cache(spot, cache_path)
     write_csv(spot, data_path)
     return spot
+
+
+def fetch_spot_akshare_fallback(config: ScreenConfig) -> pd.DataFrame:
+    def load() -> pd.DataFrame:
+        df = ak.stock_zh_a_spot()
+        if df is None or df.empty:
+            raise RuntimeError("备用实时行情为空")
+        return df
+
+    raw = fetch_with_retries("AKShare 备用实时行情", config, load)
+    return normalize_spot_akshare_fallback(raw)
+
+
+def normalize_spot_akshare_fallback(raw: pd.DataFrame) -> pd.DataFrame:
+    df = raw.copy()
+    if "代码" not in df.columns or "名称" not in df.columns or "最新价" not in df.columns:
+        raise RuntimeError(f"备用实时行情字段异常：{df.columns.tolist()}")
+    df["代码"] = (
+        df["代码"]
+        .astype(str)
+        .str.extract(r"(\d{6})", expand=False)
+        .fillna("")
+        .str.zfill(6)
+    )
+    rename_map = {
+        "买入": "买入",
+        "卖出": "卖出",
+        "昨收": "昨收",
+        "今开": "今开",
+        "最高": "最高",
+        "最低": "最低",
+        "成交量": "成交量",
+        "成交额": "成交额",
+        "涨跌幅": "涨跌幅",
+        "涨跌额": "涨跌额",
+    }
+    keep_cols = ["代码", "名称", "最新价", *[col for col in rename_map.values() if col in df.columns]]
+    work = df[keep_cols].copy()
+    for col in [c for c in work.columns if c not in {"代码", "名称"}]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work[(work["代码"] != "000000") & (work["代码"].str.len() == 6)].copy()
+    work = work.drop_duplicates(subset=["代码"], keep="last")
+    return work
 
 
 def fetch_spot_page(page: int, page_size: int, config: ScreenConfig) -> tuple[int, list[dict]]:
@@ -482,11 +533,16 @@ def fetch_dividend_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
             write_csv(cached, data_path)
             return cached
 
-    df = fetch_with_retries(
-        f"{symbol} 股息历史",
-        config,
-        lambda: ak.stock_dividend_cninfo(symbol=symbol),
-    )
+    try:
+        df = fetch_with_retries(
+            f"{symbol} 股息历史",
+            config,
+            lambda: ak.stock_dividend_cninfo(symbol=symbol),
+        )
+    except Exception as exc:
+        if "实施方案公告日期" not in str(exc):
+            raise
+        df = pd.DataFrame()
     if df is None:
         df = pd.DataFrame()
     write_csv_cache(df, cache_path)
@@ -720,8 +776,20 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             latest_price = float(work[close_col].iloc[-1])
         deviation = (latest_price / ma - 1) * 100
         latest = recent.iloc[-1]
-        pe = to_float(latest[pe_col]) if pe_col else None
-        pb = to_float(latest[pb_col]) if pb_col else None
+
+        def latest_non_null_metric(column: str | None) -> tuple[float | None, str]:
+            if column is None:
+                return None, ""
+            metric = recent[[date_col, column]].copy()
+            metric[column] = pd.to_numeric(metric[column], errors="coerce")
+            metric = metric[(metric[column].notna()) & (metric[column] > 0)].sort_values(date_col)
+            if metric.empty:
+                return None, ""
+            metric_row = metric.iloc[-1]
+            return to_float(metric_row[column]), metric_row[date_col].date().isoformat()
+
+        pe, pe_metric_date = latest_non_null_metric(pe_col)
+        pb, pb_metric_date = latest_non_null_metric(pb_col)
         pe_pct = percentile_rank(pe, recent[pe_col]) if pe_col else None
         pb_pct = percentile_rank(pb, recent[pb_col]) if pb_col else None
 
@@ -766,8 +834,15 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
         pe_pass = pe_pct is not None and pe_pct <= config.max_percentile
         pb_pass = pb_pct is not None and pb_pct <= config.max_percentile
         value_date = latest[date_col].date().isoformat()
-        valuation_date = value_date or pe_fallback_date or pb_fallback_date
-        market_cap = to_float(latest[cap_col]) if cap_col else to_float(row.get("总市值"))
+        valuation_dates = [
+            dt
+            for dt in [pe_metric_date, pb_metric_date, pe_fallback_date, pb_fallback_date]
+            if dt
+        ]
+        valuation_date = max(valuation_dates) if valuation_dates else value_date
+        market_cap, _ = latest_non_null_metric(cap_col)
+        if market_cap is None:
+            market_cap = to_float(row.get("总市值"))
         missing_metrics = []
         if pe is None:
             missing_metrics.append("PE")
@@ -1073,7 +1148,10 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         elif spot_pb is not None:
             merged["市净率"] = spot_pb
     if "总市值_估值源" in merged.columns:
-        merged["总市值"] = merged["总市值_估值源"].combine_first(merged.get("总市值"))
+        if "总市值" in merged.columns:
+            merged["总市值"] = merged["总市值_估值源"].combine_first(merged["总市值"])
+        else:
+            merged["总市值"] = merged["总市值_估值源"]
 
     price_prefiltered = merged[merged["价格达标"] == True].copy()
     diagnostics["price_prefilter_count"] = len(price_prefiltered)

@@ -74,5 +74,9 @@ datas/*.py
 cache/
 a_share_value_dashboard.html
 a_share_value_dashboard.csv
+a_share_value_dashboard_demo*.html
+a_share_value_dashboard_demo*.csv
+a_share_value_dashboard_incremental_test*.html
+a_share_value_dashboard_incremental_test*.csv
 a_share_value_dashboard_limit*.html
 a_share_value_dashboard_limit*.csv

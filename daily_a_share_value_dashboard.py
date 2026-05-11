@@ -72,6 +72,7 @@ def log(message: str) -> None:
 def ensure_cache_dir(cache_dir: Path) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "price").mkdir(exist_ok=True)
+    (cache_dir / "price_qfq").mkdir(exist_ok=True)
     (cache_dir / "valuation").mkdir(exist_ok=True)
     (cache_dir / "value").mkdir(exist_ok=True)
     (cache_dir / "industry").mkdir(exist_ok=True)
@@ -81,6 +82,7 @@ def ensure_cache_dir(cache_dir: Path) -> None:
 def ensure_data_dir(data_dir: Path) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "spot").mkdir(exist_ok=True)
+    (data_dir / "price_history_qfq").mkdir(exist_ok=True)
     (data_dir / "value_history").mkdir(exist_ok=True)
     (data_dir / "dividends").mkdir(exist_ok=True)
     (data_dir / "industry").mkdir(exist_ok=True)
@@ -665,11 +667,21 @@ def valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
 
 
 def fetch_price_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
-    cache_path = config.cache_dir / "price" / f"{symbol}_{today_stamp()}.csv"
+    data_path = config.data_dir / "price_history_qfq" / f"{symbol}.csv"
+    cache_path = config.cache_dir / "price_qfq" / f"{symbol}_{today_stamp()}.csv"
     if not config.refresh and is_cache_fresh(cache_path):
         cached = read_csv_cache(cache_path)
         if cached is not None and not cached.empty:
             return cached
+    if not config.refresh:
+        data_cached = read_csv(data_path)
+        if data_cached is not None and not data_cached.empty:
+            date_col = pick_column(data_cached.columns, ["日期", "date"])
+            if date_col is not None:
+                latest_date = pd.to_datetime(data_cached[date_col], errors="coerce").max()
+                if pd.notna(latest_date) and latest_date.date() >= date.today():
+                    write_csv_cache(data_cached, cache_path)
+                    return data_cached
 
     end = date.today()
     start = end - timedelta(days=max(420, config.price_window * 3))
@@ -679,15 +691,16 @@ def fetch_price_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
             period="daily",
             start_date=start.strftime("%Y%m%d"),
             end_date=end.strftime("%Y%m%d"),
-            adjust="",
+            adjust="qfq",
             timeout=15,
         )
         if df is None or df.empty:
-            raise RuntimeError("价格历史为空")
+            raise RuntimeError("前复权价格历史为空")
         return df
 
-    df = fetch_with_retries(f"{symbol} 价格历史", config, load)
+    df = fetch_with_retries(f"{symbol} 前复权价格历史", config, load)
     write_csv_cache(df, cache_path)
+    write_csv(df, data_path)
     return df
 
 
@@ -735,47 +748,61 @@ def price_metrics(row: pd.Series, config: ScreenConfig) -> dict:
 
 def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
     symbol = str(row["代码"]).zfill(6)
-    latest_price = to_float(row.get("最新价"))
+    price_result = price_metrics(row, config)
+    latest_price = price_result.get("现价")
+    if has_text(price_result.get("价格错误")):
+        error = str(price_result.get("价格错误"))[:300]
+        status = "历史不足" if "历史交易日不足" in error else "价格失败"
+        return {
+            "代码": symbol,
+            "现价": latest_price,
+            "半年线": None,
+            "半年线乖离率": None,
+            "价格达标": False,
+            "价格数据日期": "",
+            "市盈率": None,
+            "市净率": None,
+            "市盈率10年分位": None,
+            "市净率10年分位": None,
+            "估值分位达标": False,
+            "估值数据日期": "",
+            "总市值_估值源": None,
+            "价格错误": error,
+            "估值错误": "",
+            "价格估值错误": error,
+            "数据状态": status,
+        }
+
+    fallback_errors = []
+    pe = pb = pe_pct = pb_pct = market_cap = None
+    valuation_date = ""
+    metric_error = ""
+
     try:
-        fallback_errors = []
         df = fetch_incremental_value_history(row, config)
         date_col = pick_column(df.columns, ["数据日期", "date", "日期"])
-        close_col = pick_column(df.columns, ["当日收盘价", "收盘", "close"])
         pe_col = pick_column(df.columns, ["PE(TTM)", "pe_ttm", "市盈率ttm"])
         pb_col = pick_column(df.columns, ["市净率", "pb"])
         cap_col = pick_column(df.columns, ["总市值"])
-
-        required_missing = [
-            name
-            for name, col in [("date", date_col), ("close", close_col)]
-            if col is None
-        ]
-        if required_missing:
-            raise RuntimeError(f"东方财富估值字段缺失：{required_missing}；实际字段：{df.columns.tolist()}")
+        if date_col is None:
+            raise RuntimeError(f"东方财富估值日期字段缺失；实际字段：{df.columns.tolist()}")
 
         work = df.copy()
         work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
-        work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
         if pe_col:
             work[pe_col] = pd.to_numeric(work[pe_col], errors="coerce")
         if pb_col:
             work[pb_col] = pd.to_numeric(work[pb_col], errors="coerce")
         if cap_col:
             work[cap_col] = pd.to_numeric(work[cap_col], errors="coerce")
-        work = work[(work[date_col].notna()) & (work[close_col].notna())].sort_values(date_col)
-        if len(work) < config.price_window:
-            raise RuntimeError(f"历史交易日不足 {config.price_window}：{len(work)}")
+        work = work[work[date_col].notna()].sort_values(date_col)
+        if work.empty:
+            raise RuntimeError("东方财富估值历史无有效日期")
 
         cutoff = pd.Timestamp(date.today() - timedelta(days=365 * config.valuation_years + 30))
         recent = work[work[date_col] >= cutoff].copy()
         if recent.empty:
             recent = work.copy()
-
-        ma = float(work[close_col].tail(config.price_window).mean())
-        if latest_price is None:
-            latest_price = float(work[close_col].iloc[-1])
-        deviation = (latest_price / ma - 1) * 100
-        latest = recent.iloc[-1]
 
         def latest_non_null_metric(column: str | None) -> tuple[float | None, str]:
             if column is None:
@@ -831,15 +858,12 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             except Exception as exc:
                 fallback_errors.append(f"PB备用源: {exc}")
 
-        pe_pass = pe_pct is not None and pe_pct <= config.max_percentile
-        pb_pass = pb_pct is not None and pb_pct <= config.max_percentile
-        value_date = latest[date_col].date().isoformat()
         valuation_dates = [
             dt
             for dt in [pe_metric_date, pb_metric_date, pe_fallback_date, pb_fallback_date]
             if dt
         ]
-        valuation_date = max(valuation_dates) if valuation_dates else value_date
+        valuation_date = max(valuation_dates) if valuation_dates else work[date_col].iloc[-1].date().isoformat()
         market_cap, _ = latest_non_null_metric(cap_col)
         if market_cap is None:
             market_cap = to_float(row.get("总市值"))
@@ -852,53 +876,35 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             missing_metrics.append("PB")
         if pb_pct is None:
             missing_metrics.append("PB分位")
-        metric_error = ""
         if missing_metrics:
             metric_error = "估值字段仍缺失：" + ",".join(missing_metrics)
             if fallback_errors:
                 metric_error = f"{metric_error}；{'; '.join(fallback_errors)}"
-
-        return {
-            "代码": symbol,
-            "现价": latest_price,
-            "半年线": ma,
-            "半年线乖离率": deviation,
-            "价格达标": deviation <= config.max_below_ma_pct,
-            "价格数据日期": value_date,
-            "市盈率": pe,
-            "市净率": pb,
-            "市盈率10年分位": pe_pct,
-            "市净率10年分位": pb_pct,
-            "估值分位达标": pe_pass or pb_pass,
-            "估值数据日期": valuation_date,
-            "总市值_估值源": market_cap,
-            "价格错误": "",
-            "估值错误": metric_error[:300],
-            "价格估值错误": metric_error[:300],
-            "数据状态": "估值缺失" if metric_error else "正常",
-        }
     except Exception as exc:
-        error = str(exc)[:300]
-        status = "历史不足" if "历史交易日不足" in error else "价格失败"
-        return {
-            "代码": symbol,
-            "现价": latest_price,
-            "半年线": None,
-            "半年线乖离率": None,
-            "价格达标": False,
-            "价格数据日期": "",
-            "市盈率": None,
-            "市净率": None,
-            "市盈率10年分位": None,
-            "市净率10年分位": None,
-            "估值分位达标": False,
-            "估值数据日期": "",
-            "总市值_估值源": None,
-            "价格错误": error,
-            "估值错误": "",
-            "价格估值错误": error,
-            "数据状态": status,
-        }
+        metric_error = f"估值历史不可用：{exc}"
+        market_cap = to_float(row.get("总市值"))
+
+    pe_pass = pe_pct is not None and pe_pct <= config.max_percentile
+    pb_pass = pb_pct is not None and pb_pct <= config.max_percentile
+    return {
+        "代码": symbol,
+        "现价": latest_price,
+        "半年线": price_result.get("半年线"),
+        "半年线乖离率": price_result.get("半年线乖离率"),
+        "价格达标": price_result.get("价格达标"),
+        "价格数据日期": price_result.get("价格数据日期", ""),
+        "市盈率": pe,
+        "市净率": pb,
+        "市盈率10年分位": pe_pct,
+        "市净率10年分位": pb_pct,
+        "估值分位达标": pe_pass or pb_pass,
+        "估值数据日期": valuation_date,
+        "总市值_估值源": market_cap,
+        "价格错误": "",
+        "估值错误": metric_error[:300],
+        "价格估值错误": metric_error[:300],
+        "数据状态": "估值缺失" if metric_error else "正常",
+    }
 
 
 def dividend_metrics(row: pd.Series, config: ScreenConfig) -> dict:
@@ -2113,7 +2119,7 @@ def build_html(
 <body>
   <section class="hero">
     <h1>A 股低估高息筛选看板</h1>
-    <p>筛选条件：剔除 ST 公司，现价低于 120 日半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富、百度估值与巨潮资讯接口。</p>
+    <p>筛选条件：剔除 ST 公司，现价低于 120 日前复权半年线 10% 以上，且股息率大于 3%。市盈率和市净率仅展示，不参与筛选。数据来自 AKShare 聚合的东方财富、百度估值与巨潮资讯接口。</p>
   </section>
   <main class="wrap">
     <section class="cards">
@@ -2161,7 +2167,7 @@ def build_html(
         </table>
       </div>
       <div class="foot">
-        口径说明：半年线使用最近 {config.price_window} 个交易日收盘价均值；半年线乖离率 = 现价 / 半年线 - 1；PE/PB 和历史分位仅用于参考展示，不参与筛选。该看板只做量化筛选，不构成投资建议。
+        口径说明：半年线使用最近 {config.price_window} 个交易日前复权收盘价均值；半年线乖离率 = 现价 / 前复权半年线 - 1；PE/PB 和历史分位仅用于参考展示，不参与筛选。该看板只做量化筛选，不构成投资建议。
       </div>
     </section>
     <section id="tab-monitor" class="tab-panel" role="tabpanel">

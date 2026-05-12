@@ -127,6 +127,28 @@ def test_write_dashboard_preserves_existing_files_when_new_result_is_empty(tmp_p
     assert csv_output.read_text(encoding="utf-8") == "old csv"
 
 
+def test_write_dashboard_preserves_existing_files_when_price_fetch_mostly_fails(tmp_path):
+    output = tmp_path / "index.html"
+    csv_output = tmp_path / "index.csv"
+    output.write_text("old html", encoding="utf-8")
+    csv_output.write_text("old csv", encoding="utf-8")
+    config = ScreenConfig(output=output)
+    new_result = pd.DataFrame([{"代码": "000501", "名称": "武商集团"}])
+
+    write_dashboard(
+        new_result,
+        {
+            "universe_count": 5000,
+            "price_prescreen_candidate_count": 849,
+            "price_error_count": 809,
+        },
+        config,
+    )
+
+    assert output.read_text(encoding="utf-8") == "old html"
+    assert csv_output.read_text(encoding="utf-8") == "old csv"
+
+
 def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_path):
     calls = {}
 

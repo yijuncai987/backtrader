@@ -1339,6 +1339,14 @@ def write_failure_report(records: list[dict], config: ScreenConfig, diagnostics:
     diagnostics["failure_report_path"] = str(report_path)
 
 
+def has_severe_price_fetch_failure(diagnostics: dict) -> bool:
+    candidate_count = int(diagnostics.get("price_prescreen_candidate_count") or 0)
+    price_error_count = int(diagnostics.get("price_error_count") or 0)
+    if candidate_count < 100:
+        return False
+    return price_error_count >= max(100, int(candidate_count * 0.5))
+
+
 def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     ensure_cache_dir(config.cache_dir)
     ensure_data_dir(config.data_dir)
@@ -1437,6 +1445,14 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     )
     add_failure_records(failure_records, value_failure_source, "价格/历史", "价格错误")
     add_failure_records(failure_records, value_failure_source, "估值字段", "估值错误")
+    if has_severe_price_fetch_failure(diagnostics):
+        diagnostics["data_quality_blocked"] = True
+        write_failure_report(failure_records, config, diagnostics)
+        log(
+            "前复权价格接口大面积失败，保留上一版看板："
+            f"{diagnostics['price_error_count']}/{diagnostics['price_prescreen_candidate_count']} 条候选失败"
+        )
+        return pd.DataFrame(), diagnostics
 
     merged = spot.merge(values, on="代码", how="left")
     if "市净率_y" in merged.columns or "市净率_x" in merged.columns:
@@ -2523,6 +2539,10 @@ def should_preserve_existing_dashboard(
 
     universe_count = int(diagnostics.get("universe_count") or 0)
     if universe_count and universe_count < MIN_USABLE_SPOT_ROWS:
+        return True
+    if diagnostics.get("data_quality_blocked"):
+        return True
+    if has_severe_price_fetch_failure(diagnostics):
         return True
     return df.empty
 

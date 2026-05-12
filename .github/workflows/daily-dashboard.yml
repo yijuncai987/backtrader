@@ -7,8 +7,8 @@ on:
     paths:
       - ".github/workflows/daily-dashboard.yml"
   schedule:
-    # 03:00 Asia/Shanghai. GitHub Actions cron uses UTC.
-    - cron: "0 19 * * *"
+    # 01:00 Asia/Shanghai. GitHub Actions cron uses UTC.
+    - cron: "0 17 * * *"
   workflow_dispatch:
 
 permissions:
@@ -23,6 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 330
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,12 +41,19 @@ jobs:
           pip install -r requirements-dashboard.txt
 
       - name: Generate dashboard
+        timeout-minutes: 300
         run: |
           python daily_a_share_value_dashboard.py \
             --output docs/index.html \
             --cache-dir cache/a_share_value_dashboard \
             --data-dir data/a_share \
-            --refresh
+            --refresh \
+            --price-workers 3 \
+            --spot-workers 2 \
+            --request-pause 0.8 \
+            --request-retries 4 \
+            --spot-timeout 30 \
+            --batch-timeout-seconds 12600
 
       - name: Commit updated dashboard data
         run: |

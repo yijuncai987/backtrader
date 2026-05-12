@@ -19,10 +19,11 @@ import html
 import json
 import math
 import os
+import socket
 import time
 import traceback
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -56,6 +57,7 @@ class ScreenConfig:
     request_retries: int = 3
     retry_backoff: float = 1.5
     failed_item_retries: int = 1
+    batch_timeout_seconds: float = 12600.0
     limit: int | None = None
     refresh: bool = False
     rebuild_history: bool = False
@@ -213,6 +215,17 @@ def read_spot_snapshot(path: Path) -> pd.DataFrame | None:
     return data_cached
 
 
+def read_latest_spot_snapshot(data_dir: Path) -> tuple[pd.DataFrame | None, Path | None]:
+    spot_dir = data_dir / "spot"
+    if not spot_dir.exists():
+        return None, None
+    for path in sorted(spot_dir.glob("*.csv"), reverse=True):
+        data_cached = read_spot_snapshot(path)
+        if data_cached is not None:
+            return data_cached, path
+    return None, None
+
+
 def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     data_path = config.data_dir / "spot" / f"{today_stamp()}.csv"
     if not config.refresh:
@@ -249,6 +262,10 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
             if data_cached is not None:
                 log(f"实时行情拉取失败，使用当日行情库：{data_path}；错误：{exc}")
                 return data_cached
+            latest_cached, latest_path = read_latest_spot_snapshot(config.data_dir)
+            if latest_cached is not None and latest_path is not None:
+                log(f"实时行情拉取失败，使用最近一次行情库：{latest_path}；错误：{exc}")
+                return latest_cached
             raise
 
     required = {"代码", "名称", "最新价"}
@@ -666,22 +683,74 @@ def valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
         }
 
 
-def fetch_price_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
+def is_probable_trading_day(day: date | None = None) -> bool:
+    day = day or date.today()
+    return day.weekday() < 5
+
+
+def append_latest_price_to_history(
+    history: pd.DataFrame,
+    latest_price: float,
+) -> pd.DataFrame:
+    date_col = pick_column(history.columns, ["日期", "date"])
+    close_col = pick_column(history.columns, ["收盘", "close"])
+    if date_col is None or close_col is None:
+        raise RuntimeError(f"本地价格历史缺少日期或收盘字段：{history.columns.tolist()}")
+
+    work = history.copy()
+    today = date.today()
+    today_text = today.isoformat()
+    if today_text not in set(work[date_col].astype(str)):
+        row = {col: None for col in work.columns}
+        row[date_col] = today_text
+        row[close_col] = latest_price
+        work = pd.concat([work, pd.DataFrame([row])], ignore_index=True)
+
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
+    work = work[(work[date_col].notna()) & (work[close_col].notna())].copy()
+    work = work.sort_values(date_col).drop_duplicates(subset=[date_col], keep="last")
+    work[date_col] = work[date_col].dt.date.astype(str)
+    return work
+
+
+def fetch_price_history(
+    symbol: str,
+    config: ScreenConfig,
+    latest_price: float | None = None,
+) -> pd.DataFrame:
     data_path = config.data_dir / "price_history_qfq" / f"{symbol}.csv"
     cache_path = config.cache_dir / "price_qfq" / f"{symbol}_{today_stamp()}.csv"
     if not config.refresh and is_cache_fresh(cache_path):
         cached = read_csv_cache(cache_path)
         if cached is not None and not cached.empty:
             return cached
-    if not config.refresh:
-        data_cached = read_csv(data_path)
-        if data_cached is not None and not data_cached.empty:
-            date_col = pick_column(data_cached.columns, ["日期", "date"])
-            if date_col is not None:
-                latest_date = pd.to_datetime(data_cached[date_col], errors="coerce").max()
-                if pd.notna(latest_date) and latest_date.date() >= date.today():
-                    write_csv_cache(data_cached, cache_path)
-                    return data_cached
+
+    data_cached = None if config.rebuild_history else read_csv(data_path)
+    if data_cached is not None and not data_cached.empty:
+        date_col = pick_column(data_cached.columns, ["日期", "date"])
+        close_col = pick_column(data_cached.columns, ["收盘", "close"])
+        if date_col is not None and close_col is not None:
+            latest_date = pd.to_datetime(data_cached[date_col], errors="coerce").max()
+            if pd.notna(latest_date) and latest_date.date() >= date.today():
+                write_csv_cache(data_cached, cache_path)
+                return data_cached
+
+            latest_price_value = to_float(latest_price)
+            if (
+                latest_price_value is not None
+                and latest_price_value > 0
+                and is_probable_trading_day()
+                and (pd.isna(latest_date) or latest_date.date() < date.today())
+            ):
+                updated = append_latest_price_to_history(data_cached, latest_price_value)
+                write_csv_cache(updated, cache_path)
+                write_csv(updated, data_path)
+                return updated
+
+            if len(data_cached) >= config.price_window:
+                write_csv_cache(data_cached, cache_path)
+                return data_cached
 
     end = date.today()
     start = end - timedelta(days=max(420, config.price_window * 3))
@@ -707,7 +776,8 @@ def fetch_price_history(symbol: str, config: ScreenConfig) -> pd.DataFrame:
 def price_metrics(row: pd.Series, config: ScreenConfig) -> dict:
     symbol = str(row["代码"]).zfill(6)
     try:
-        df = fetch_price_history(symbol, config)
+        latest_price = to_float(row.get("最新价"))
+        df = fetch_price_history(symbol, config, latest_price=latest_price)
         close_col = pick_column(df.columns, ["收盘", "close"])
         date_col = pick_column(df.columns, ["日期", "date"])
         if close_col is None:
@@ -718,7 +788,6 @@ def price_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             raise RuntimeError(f"历史交易日不足 {config.price_window}：{len(df)}")
 
         ma = float(df[close_col].tail(config.price_window).mean())
-        latest_price = to_float(row.get("最新价"))
         if latest_price is None:
             latest_price = float(df[close_col].iloc[-1])
         deviation = (latest_price / ma - 1) * 100
@@ -965,6 +1034,9 @@ def parallel_map(
     rows: Iterable,
     worker: Callable,
     max_workers: int,
+    timeout_seconds: float | None = None,
+    timeout_result: Callable | None = None,
+    error_result: Callable | None = None,
 ) -> list:
     rows = list(rows)
     if not rows:
@@ -972,13 +1044,74 @@ def parallel_map(
     results = []
     total = len(rows)
     log(f"{label}：开始处理 {total} 条，workers={max_workers}")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(worker, row): row for row in rows}
-        for idx, future in enumerate(as_completed(future_map), start=1):
-            results.append(future.result())
-            if idx == total or idx % 50 == 0:
-                log(f"{label}：{idx}/{total}")
+    timeout = None if timeout_seconds is None or timeout_seconds <= 0 else float(timeout_seconds)
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    future_map = {executor.submit(worker, row): row for row in rows}
+    completed = 0
+    try:
+        for future in as_completed(future_map, timeout=timeout):
+            row = future_map[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                if error_result is None:
+                    raise
+                results.append(error_result(row, exc))
+            completed += 1
+            if completed == total or completed % 50 == 0:
+                log(f"{label}：{completed}/{total}")
+    except FuturesTimeoutError:
+        pending = [(future, row) for future, row in future_map.items() if not future.done()]
+        log(f"{label}：超过 {timeout:.0f} 秒，跳过剩余 {len(pending)} 条")
+        for future, row in pending:
+            future.cancel()
+            if timeout_result is not None:
+                results.append(timeout_result(row, f"{label}批量超时"))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     return results
+
+
+def skipped_price_valuation_result(row: pd.Series, reason) -> dict:
+    symbol = str(row["代码"]).zfill(6)
+    error = str(reason)[:300]
+    return {
+        "代码": symbol,
+        "现价": to_float(row.get("最新价")),
+        "半年线": None,
+        "半年线乖离率": None,
+        "价格达标": False,
+        "价格数据日期": "",
+        "市盈率": None,
+        "市净率": None,
+        "市盈率10年分位": None,
+        "市净率10年分位": None,
+        "估值分位达标": False,
+        "估值数据日期": "",
+        "总市值_估值源": to_float(row.get("总市值")),
+        "价格错误": error,
+        "估值错误": "",
+        "价格估值错误": error,
+        "数据状态": "超时跳过",
+    }
+
+
+def skipped_dividend_result(row: pd.Series, reason) -> dict:
+    return {
+        "代码": str(row["代码"]).zfill(6),
+        "股息率": None,
+        "股息率达标": False,
+        "股息数据日期": "",
+        "股息错误": str(reason)[:300],
+    }
+
+
+def skipped_industry_result(symbol: str, reason) -> dict:
+    return {
+        "代码": str(symbol).zfill(6),
+        "所属行业": "未知",
+        "行业错误": str(reason)[:200],
+    }
 
 
 def is_st_stock_name(name) -> bool:
@@ -1044,6 +1177,9 @@ def retry_price_valuation_failures(
                 retry_rows,
                 lambda row: price_valuation_metrics(row, config),
                 max_workers=1,
+                timeout_seconds=min(config.batch_timeout_seconds, 1800),
+                timeout_result=skipped_price_valuation_result,
+                error_result=skipped_price_valuation_result,
             )
         )
         if retry_values.empty:
@@ -1121,6 +1257,9 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         [row for _, row in spot.iterrows()],
         lambda row: price_valuation_metrics(row, config),
         max_workers=max(1, config.price_workers),
+        timeout_seconds=config.batch_timeout_seconds,
+        timeout_result=skipped_price_valuation_result,
+        error_result=skipped_price_valuation_result,
     )
     values = pd.DataFrame(value_rows)
     if values.empty:
@@ -1171,6 +1310,9 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         [row for _, row in price_prefiltered.iterrows()],
         lambda row: dividend_metrics(row, config),
         max_workers=max(1, config.valuation_workers),
+        timeout_seconds=min(config.batch_timeout_seconds, 1800),
+        timeout_result=skipped_dividend_result,
+        error_result=skipped_dividend_result,
     )
     dividends = pd.DataFrame(dividend_rows)
     if "代码" in dividends.columns:
@@ -1192,6 +1334,9 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         final_df["代码"].astype(str).tolist(),
         lambda symbol: industry_for_symbol(symbol, config),
         max_workers=max(1, config.industry_workers),
+        timeout_seconds=min(config.batch_timeout_seconds, 900),
+        timeout_result=skipped_industry_result,
+        error_result=skipped_industry_result,
     )
     if industry_rows:
         industry = pd.DataFrame(industry_rows)
@@ -1383,6 +1528,9 @@ def fetch_bj_market_volume_history(config: ScreenConfig) -> pd.DataFrame:
         symbols,
         lambda symbol: fetch_bj_stock_history_for_volume(symbol, config),
         max_workers=max(1, config.spot_workers),
+        timeout_seconds=min(config.batch_timeout_seconds, 1800),
+        timeout_result=lambda symbol, reason: pd.DataFrame(columns=["日期", "北交所成交量"]),
+        error_result=lambda symbol, reason: pd.DataFrame(columns=["日期", "北交所成交量"]),
     )
     valid = [df for df in histories if df is not None and not df.empty]
     if not valid:
@@ -2269,6 +2417,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-retries", type=int, default=3, help="外部接口失败后的重试次数，默认 3")
     parser.add_argument("--retry-backoff", type=float, default=1.5, help="接口重试等待时间倍率，默认 1.5")
     parser.add_argument("--failed-item-retries", type=int, default=1, help="批量结束后对失败股票额外重试轮数，默认 1")
+    parser.add_argument("--batch-timeout-seconds", type=float, default=12600.0, help="单个批量阶段最长等待秒数，超时后跳过剩余项")
     parser.add_argument("--dividend-lookback-days", type=int, default=365, help="股息率回看天数，默认 365")
     parser.add_argument("--monitor-days", type=int, default=90, help="市场监测自然日窗口，默认 90 天")
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 只股票，调试用")
@@ -2296,6 +2445,7 @@ def main() -> int:
         request_retries=args.request_retries,
         retry_backoff=args.retry_backoff,
         failed_item_retries=args.failed_item_retries,
+        batch_timeout_seconds=args.batch_timeout_seconds,
         dividend_lookback_days=args.dividend_lookback_days,
         monitor_days=args.monitor_days,
         limit=args.limit,
@@ -2308,6 +2458,7 @@ def main() -> int:
     )
 
     log("A 股低估高息筛选开始")
+    socket.setdefaulttimeout(max(10.0, min(float(config.spot_timeout), 60.0)))
     try:
         if args.demo:
             df, diagnostics = demo_screen(config)

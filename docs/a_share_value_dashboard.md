@@ -94,7 +94,7 @@ python daily_a_share_value_dashboard.py --rebuild-history
 cache/a_share_value_dashboard/
 ```
 
-后续每天运行只需要拉取当天全 A 行情，并把当天数据追加到 `data/a_share/value_history/`。只有新股票、缺失历史库的股票、或显式 `--rebuild-history` 时才会重新拉取全量历史。为了减少慢接口调用，脚本只有在价格条件达标后才请求股息数据。
+后续每天运行只需要拉取当天全 A 行情，并把当天数据追加到 `data/a_share/value_history/`。前复权价格历史也会优先使用本地 `data/a_share/price_history_qfq/`，并用当天行情价增量补齐最新一行；只有新股票、缺失历史库的股票、或显式 `--rebuild-history` 时才会重新拉取全量历史。为了减少慢接口调用，脚本只有在价格条件达标后才请求股息数据。
 
 可调参数：
 
@@ -107,6 +107,7 @@ python daily_a_share_value_dashboard.py ^
   --request-pause 0.5 ^
   --request-retries 3 ^
   --failed-item-retries 1 ^
+  --batch-timeout-seconds 12600 ^
   --price-window 120 ^
   --max-below-ma-pct -10 ^
   --min-dividend-yield-pct 3 ^
@@ -116,13 +117,13 @@ python daily_a_share_value_dashboard.py ^
 
 `--max-percentile` 当前只影响页面展示的分位计算阈值说明兼容项，不再作为筛选条件。
 
-默认配置已经偏向“慢但稳”：降低并发、每次外部请求前暂停、接口失败后自动重试，并在批量结束后对失败股票额外补跑一轮。仍未补上的股票会写入：
+默认配置已经偏向“慢但稳”：降低并发、每次外部请求前暂停、接口失败后自动重试，并在批量结束后对失败股票额外补跑一轮。批量阶段达到 `--batch-timeout-seconds` 后会跳过剩余个别项，继续生成看板，避免整次任务卡死。仍未补上的股票会写入：
 
 ```text
 data/a_share/failures/YYYYMMDD.csv
 ```
 
-如果东方财富分页行情接口中途断开，脚本会自动切换到 AKShare 的备用实时行情接口继续生成当天快照。备用行情源字段更少，缺少当天 PE/PB 时会沿用本地历史库里最近一个非空估值用于展示和分位计算。
+如果东方财富分页行情接口中途断开，脚本会自动切换到 AKShare 的备用实时行情接口继续生成当天快照；备用接口也不可用时，会使用本地最近一次行情快照兜底。备用行情源字段更少，缺少当天 PE/PB 时会沿用本地历史库里最近一个非空估值用于展示和分位计算。
 
 价格筛选和估值展示使用不同数据源：半年线与乖离率只使用 `stock_zh_a_hist(adjust="qfq")` 的前复权价格；PE/PB、总市值等估值字段继续来自东方财富估值历史。不要用 `data/a_share/value_history/` 的未复权收盘价计算技术指标。
 
@@ -137,7 +138,7 @@ python daily_a_share_value_dashboard.py --price-workers 2 --valuation-workers 1 
 2026-05-11 本地验证结果：
 
 - `python -m py_compile daily_a_share_value_dashboard.py`：通过。
-- `python -m pytest tests\test_daily_a_share_value_dashboard.py -q`：5 个测试通过。
+- `python -m pytest tests\test_daily_a_share_value_dashboard.py -q`：10 个测试通过。
 - `python daily_a_share_value_dashboard.py --demo --output %TEMP%\a_share_value_dashboard_smoke.html`：成功生成演示面板。
 
 2026-05-08 本地验证结果：

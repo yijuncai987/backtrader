@@ -1,4 +1,5 @@
 import json
+from datetime import date as real_date
 
 import pandas as pd
 import pytest
@@ -55,6 +56,7 @@ def test_default_live_fetching_prefers_stability():
     assert config.request_pause == 0.5
     assert config.request_retries == 3
     assert config.failed_item_retries == 1
+    assert config.batch_timeout_seconds == 12600.0
 
 
 def test_normalize_spot_akshare_fallback_strips_market_prefixes():
@@ -94,6 +96,66 @@ def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_p
     assert calls["adjust"] == "qfq"
 
 
+def test_fetch_price_history_uses_local_history_when_refreshing(monkeypatch, tmp_path):
+    def fail_stock_zh_a_hist(**kwargs):
+        pytest.fail("local price history should avoid a full external refresh")
+
+    monkeypatch.setattr(dashboard.ak, "stock_zh_a_hist", fail_stock_zh_a_hist)
+    config = ScreenConfig(
+        cache_dir=tmp_path / "cache",
+        data_dir=tmp_path / "data",
+        refresh=True,
+    )
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+    path = config.data_dir / "price_history_qfq" / "300501.csv"
+    history = pd.DataFrame(
+        {
+            "日期": pd.date_range(end=real_date.today(), periods=120, freq="D").astype(str),
+            "收盘": [10.0] * 120,
+        }
+    )
+    history.to_csv(path, index=False, encoding="utf-8-sig")
+
+    result = fetch_price_history("300501", config)
+
+    assert len(result) == 120
+    assert result["收盘"].iloc[-1] == 10.0
+
+
+def test_fetch_price_history_appends_spot_price_to_local_history(monkeypatch, tmp_path):
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 12)
+
+    def fail_stock_zh_a_hist(**kwargs):
+        pytest.fail("stale local price history should be updated incrementally from spot")
+
+    monkeypatch.setattr(dashboard, "date", FixedDate)
+    monkeypatch.setattr(dashboard.ak, "stock_zh_a_hist", fail_stock_zh_a_hist)
+    config = ScreenConfig(
+        cache_dir=tmp_path / "cache",
+        data_dir=tmp_path / "data",
+        refresh=True,
+    )
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+    path = config.data_dir / "price_history_qfq" / "300501.csv"
+    history = pd.DataFrame(
+        {
+            "日期": pd.date_range(end="2026-05-11", periods=120, freq="B").astype(str),
+            "收盘": [10.0] * 120,
+        }
+    )
+    history.to_csv(path, index=False, encoding="utf-8-sig")
+
+    result = fetch_price_history("300501", config, latest_price=8.9)
+
+    assert result["日期"].iloc[-1] == "2026-05-12"
+    assert result["收盘"].iloc[-1] == 8.9
+
+
 def test_price_valuation_metrics_does_not_use_unadjusted_value_close(monkeypatch):
     dates = pd.date_range("2026-01-01", periods=120, freq="B")
     qfq_prices = pd.DataFrame({"日期": dates.astype(str), "收盘": [10.0] * 120})
@@ -107,7 +169,7 @@ def test_price_valuation_metrics_does_not_use_unadjusted_value_close(monkeypatch
         }
     )
 
-    monkeypatch.setattr(dashboard, "fetch_price_history", lambda symbol, config: qfq_prices)
+    monkeypatch.setattr(dashboard, "fetch_price_history", lambda symbol, config, latest_price=None: qfq_prices)
     monkeypatch.setattr(
         dashboard,
         "fetch_incremental_value_history",

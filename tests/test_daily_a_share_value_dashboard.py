@@ -20,6 +20,7 @@ from daily_a_share_value_dashboard import (  # noqa: E402
     monitor_date_window,
     monitor_records_for_html,
     normalize_spot_akshare_fallback,
+    write_dashboard,
 )
 
 
@@ -90,6 +91,39 @@ def test_fill_latest_price_from_previous_close_keeps_premarket_rows():
 
     assert filled["最新价"].tolist()[:3] == [8.88, 9.91, 8.9]
     assert tradable["代码"].tolist() == ["600000", "000001", "300501"]
+
+
+def test_read_latest_spot_snapshot_skips_tiny_partial_files(tmp_path):
+    data_dir = tmp_path / "data"
+    ensure_data_dir(data_dir)
+    small = pd.DataFrame([{"代码": "000001", "名称": "坏快照", "最新价": 1.0}])
+    usable = pd.DataFrame(
+        {
+            "代码": [f"{idx:06d}" for idx in range(1000)],
+            "名称": [f"股票{idx}" for idx in range(1000)],
+            "最新价": [1.0] * 1000,
+        }
+    )
+    small.to_csv(data_dir / "spot" / "20260512.csv", index=False, encoding="utf-8-sig")
+    usable.to_csv(data_dir / "spot" / "20260511.csv", index=False, encoding="utf-8-sig")
+
+    snapshot, path = dashboard.read_latest_spot_snapshot(data_dir)
+
+    assert path.name == "20260511.csv"
+    assert len(snapshot) == 1000
+
+
+def test_write_dashboard_preserves_existing_files_when_new_result_is_empty(tmp_path):
+    output = tmp_path / "index.html"
+    csv_output = tmp_path / "index.csv"
+    output.write_text("old html", encoding="utf-8")
+    csv_output.write_text("old csv", encoding="utf-8")
+    config = ScreenConfig(output=output)
+
+    write_dashboard(pd.DataFrame(), {"universe_count": 5000}, config)
+
+    assert output.read_text(encoding="utf-8") == "old html"
+    assert csv_output.read_text(encoding="utf-8") == "old csv"
 
 
 def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_path):

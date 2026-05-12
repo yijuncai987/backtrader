@@ -37,6 +37,7 @@ import requests
 DEFAULT_OUTPUT = "a_share_value_dashboard.html"
 DEFAULT_CACHE_DIR = Path("cache") / "a_share_value_dashboard"
 DEFAULT_DATA_DIR = Path("data") / "a_share"
+MIN_USABLE_SPOT_ROWS = 1000
 
 
 @dataclass
@@ -206,21 +207,31 @@ def fetch_with_retries(label: str, config: ScreenConfig, fetcher: Callable):
     raise RuntimeError(f"{label}失败，已尝试 {attempts} 次：{last_error}") from last_error
 
 
-def read_spot_snapshot(path: Path) -> pd.DataFrame | None:
+def read_spot_snapshot(path: Path, min_rows: int = 1) -> pd.DataFrame | None:
     data_cached = read_csv(path)
     if data_cached is None or data_cached.empty:
         return None
     if "代码" in data_cached.columns:
         data_cached["代码"] = data_cached["代码"].astype(str).str.zfill(6)
+    if len(data_cached) < min_rows:
+        log(f"跳过行情快照：{path} 只有 {len(data_cached)} 条，少于 {min_rows} 条")
+        return None
     return data_cached
 
 
-def read_latest_spot_snapshot(data_dir: Path) -> tuple[pd.DataFrame | None, Path | None]:
+def read_latest_spot_snapshot(
+    data_dir: Path,
+    min_rows: int = MIN_USABLE_SPOT_ROWS,
+    exclude: set[Path] | None = None,
+) -> tuple[pd.DataFrame | None, Path | None]:
     spot_dir = data_dir / "spot"
     if not spot_dir.exists():
         return None, None
+    excluded = {path.resolve() for path in (exclude or set())}
     for path in sorted(spot_dir.glob("*.csv"), reverse=True):
-        data_cached = read_spot_snapshot(path)
+        if path.resolve() in excluded:
+            continue
+        data_cached = read_spot_snapshot(path, min_rows=min_rows)
         if data_cached is not None:
             return data_cached, path
     return None, None
@@ -229,7 +240,7 @@ def read_latest_spot_snapshot(data_dir: Path) -> tuple[pd.DataFrame | None, Path
 def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     data_path = config.data_dir / "spot" / f"{today_stamp()}.csv"
     if not config.refresh:
-        data_cached = read_spot_snapshot(data_path)
+        data_cached = read_spot_snapshot(data_path, min_rows=MIN_USABLE_SPOT_ROWS)
         if data_cached is not None:
             log(f"读取当日行情库：{data_path}")
             return data_cached
@@ -258,11 +269,11 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
             log(f"AKShare 备用实时行情可用：{len(spot)} 条")
         except Exception as fallback_exc:
             log(f"AKShare 备用实时行情也失败：{fallback_exc}")
-            data_cached = read_spot_snapshot(data_path)
+            data_cached = read_spot_snapshot(data_path, min_rows=MIN_USABLE_SPOT_ROWS)
             if data_cached is not None:
                 log(f"实时行情拉取失败，使用当日行情库：{data_path}；错误：{exc}")
                 return data_cached
-            latest_cached, latest_path = read_latest_spot_snapshot(config.data_dir)
+            latest_cached, latest_path = read_latest_spot_snapshot(config.data_dir, exclude={data_path})
             if latest_cached is not None and latest_path is not None:
                 log(f"实时行情拉取失败，使用最近一次行情库：{latest_path}；错误：{exc}")
                 return latest_cached
@@ -276,6 +287,12 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     spot["代码"] = spot["代码"].astype(str).str.zfill(6)
     spot = fill_latest_price_from_previous_close(spot)
     spot = spot[pd.to_numeric(spot["最新价"], errors="coerce") > 0].copy()
+    if len(spot) < MIN_USABLE_SPOT_ROWS:
+        latest_cached, latest_path = read_latest_spot_snapshot(config.data_dir, exclude={data_path})
+        if latest_cached is not None and latest_path is not None:
+            log(f"本次行情有效行数过少：{len(spot)} 条，改用最近一次行情库：{latest_path}")
+            return latest_cached
+        raise RuntimeError(f"本次行情有效行数过少：{len(spot)} 条")
     write_csv_cache(spot, cache_path)
     write_csv(spot, data_path)
     return spot
@@ -2374,6 +2391,21 @@ def build_html(
 </html>"""
 
 
+def should_preserve_existing_dashboard(
+    df: pd.DataFrame,
+    diagnostics: dict,
+    output: Path,
+) -> bool:
+    csv_output = output.with_suffix(".csv")
+    if not output.exists() or not csv_output.exists():
+        return False
+
+    universe_count = int(diagnostics.get("universe_count") or 0)
+    if universe_count and universe_count < MIN_USABLE_SPOT_ROWS:
+        return True
+    return df.empty
+
+
 def write_dashboard(
     df: pd.DataFrame,
     diagnostics: dict,
@@ -2382,9 +2414,13 @@ def write_dashboard(
 ) -> Path:
     output = config.output
     output.parent.mkdir(parents=True, exist_ok=True) if output.parent != Path(".") else None
+    csv_output = output.with_suffix(".csv")
+    if should_preserve_existing_dashboard(df, diagnostics, output):
+        log(f"新结果为空或样本过少，保留上一版看板：{output}")
+        return output
+
     html_text = build_html(df, diagnostics, config, market_monitor)
     output.write_text(html_text, encoding="utf-8")
-    csv_output = output.with_suffix(".csv")
     export_cols = [
         "代码",
         "名称",

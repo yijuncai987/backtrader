@@ -1,0 +1,4 @@
+﻿日期,阶段,代码,名称,错误,建议重试
+2026-05-12,价格/历史,603311,金海高科,"603311 前复权价格历史失败，已尝试 5 次：('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",是
+2026-05-12,价格/历史,603779,威龙股份,"603779 前复权价格历史失败，已尝试 5 次：('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",是
+2026-05-12,价格/历史,688121,卓然股份,"688121 前复权价格历史失败，已尝试 5 次：('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",是

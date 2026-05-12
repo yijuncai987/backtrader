@@ -62,6 +62,15 @@ def test_default_live_fetching_prefers_stability():
     assert config.price_prescreen_margin_pct == 0.0
 
 
+def test_current_market_data_date_uses_previous_day_before_close():
+    assert dashboard.current_market_data_date(
+        dashboard.datetime(2026, 5, 13, 1, 0)
+    ) == real_date(2026, 5, 12)
+    assert dashboard.current_market_data_date(
+        dashboard.datetime(2026, 5, 12, 15, 30)
+    ) == real_date(2026, 5, 12)
+
+
 def test_normalize_spot_akshare_fallback_strips_market_prefixes():
     raw = pd.DataFrame(
         [
@@ -112,6 +121,67 @@ def test_read_latest_spot_snapshot_skips_tiny_partial_files(tmp_path):
 
     assert path.name == "20260511.csv"
     assert len(snapshot) == 1000
+
+
+def test_read_csv_normalizes_leading_zero_codes(tmp_path):
+    path = tmp_path / "codes.csv"
+    path.write_text("代码,名称\n000596,古井贡酒\nbj920000,安徽凤凰\n", encoding="utf-8-sig")
+
+    df = dashboard.read_csv(path)
+
+    assert df["代码"].tolist() == ["000596", "920000"]
+
+
+def test_industry_for_symbol_accepts_numeric_like_codes(tmp_path):
+    config = ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data", request_pause=0)
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+    (config.data_dir / "industry" / "000596.csv").write_text(
+        "所属行业\n白酒Ⅱ\n",
+        encoding="utf-8-sig",
+    )
+
+    result = dashboard.industry_for_symbol("596", config)
+
+    assert result["代码"] == "000596"
+    assert result["所属行业"] == "白酒Ⅱ"
+
+
+def test_industry_for_symbol_falls_back_to_cninfo(monkeypatch, tmp_path):
+    def fail_individual_info(**kwargs):
+        raise RuntimeError("东方财富断开")
+
+    def fake_industry_change(**kwargs):
+        return pd.DataFrame(
+            [
+                {
+                    "证券代码": "300641",
+                    "分类标准": "申银万国行业分类标准",
+                    "行业大类": "其他化学制品",
+                    "行业中类": "化学制品",
+                    "行业次类": "化工",
+                    "行业门类": "原材料",
+                    "变更日期": "2021-07-30",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(dashboard.ak, "stock_individual_info_em", fail_individual_info)
+    monkeypatch.setattr(dashboard.ak, "stock_industry_change_cninfo", fake_industry_change)
+    config = ScreenConfig(
+        cache_dir=tmp_path / "cache",
+        data_dir=tmp_path / "data",
+        request_pause=0,
+        request_retries=0,
+    )
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+
+    result = dashboard.industry_for_symbol("300641", config)
+
+    assert result["所属行业"] == "其他化学制品"
+    assert result["行业错误"] == ""
+    assert dashboard.read_csv(config.data_dir / "industry" / "300641.csv")["所属行业"].iloc[0] == "其他化学制品"
 
 
 def test_write_dashboard_preserves_existing_files_when_new_result_is_empty(tmp_path):
@@ -233,6 +303,40 @@ def test_local_price_prescreen_uses_cached_value_history(tmp_path):
     assert not (config.data_dir / "price_history_qfq" / "300501.csv").exists()
 
 
+def test_incremental_value_history_extends_missing_live_valuation(monkeypatch, tmp_path):
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 12)
+
+    monkeypatch.setattr(dashboard, "date", FixedDate)
+    monkeypatch.setattr(dashboard, "current_market_data_date", lambda: real_date(2026, 5, 12))
+    config = ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data")
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+    path = config.data_dir / "value_history" / "000596.csv"
+    pd.DataFrame(
+        {
+            "数据日期": ["2026-05-08", "2026-05-11"],
+            "当日收盘价": [106.36, 104.97],
+            "总市值": [56_221_900_000.0, None],
+            "PE(TTM)": [19.89, None],
+            "市净率": [2.15, None],
+        }
+    ).to_csv(path, index=False, encoding="utf-8-sig")
+
+    result = dashboard.fetch_incremental_value_history(
+        pd.Series({"代码": 596, "名称": "古井贡酒", "最新价": 102.54}),
+        config,
+    )
+    latest = result.iloc[-1]
+
+    assert latest["数据日期"] == "2026-05-12"
+    assert latest["PE(TTM)"] == pytest.approx(19.89 * 102.54 / 106.36)
+    assert latest["市净率"] == pytest.approx(2.15 * 102.54 / 106.36)
+    assert latest["总市值"] == pytest.approx(56_221_900_000.0 * 102.54 / 106.36)
+
+
 def test_fetch_price_history_uses_local_history_when_refreshing(monkeypatch, tmp_path):
     def fail_stock_zh_a_hist(**kwargs):
         pytest.fail("local price history should avoid a full external refresh")
@@ -270,6 +374,7 @@ def test_fetch_price_history_appends_spot_price_to_local_history(monkeypatch, tm
         pytest.fail("stale local price history should be updated incrementally from spot")
 
     monkeypatch.setattr(dashboard, "date", FixedDate)
+    monkeypatch.setattr(dashboard, "current_market_data_date", lambda: real_date(2026, 5, 12))
     monkeypatch.setattr(dashboard.ak, "stock_zh_a_hist", fail_stock_zh_a_hist)
     config = ScreenConfig(
         cache_dir=tmp_path / "cache",

@@ -19,6 +19,7 @@ import html
 import json
 import math
 import os
+import re
 import socket
 import time
 import traceback
@@ -106,11 +107,37 @@ def is_cache_fresh(path: Path) -> bool:
     return modified == date.today()
 
 
+def normalize_symbol(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    text = str(value).strip()
+    if not text:
+        return ""
+    parts = re.findall(r"\d+", text)
+    if not parts:
+        return text
+    code = max(parts, key=len)
+    return code[-6:].zfill(6)
+
+
+def normalize_code_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if "代码" not in df.columns:
+        return df
+    work = df.copy()
+    work["代码"] = work["代码"].map(normalize_symbol)
+    return work
+
+
 def read_csv_cache(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
     try:
-        return pd.read_csv(path, encoding="utf-8-sig")
+        return normalize_code_columns(pd.read_csv(path, encoding="utf-8-sig"))
     except Exception:
         return None
 
@@ -124,7 +151,7 @@ def read_csv(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
     try:
-        return pd.read_csv(path, encoding="utf-8-sig")
+        return normalize_code_columns(pd.read_csv(path, encoding="utf-8-sig"))
     except Exception:
         return None
 
@@ -213,7 +240,7 @@ def read_spot_snapshot(path: Path, min_rows: int = 1) -> pd.DataFrame | None:
     if data_cached is None or data_cached.empty:
         return None
     if "代码" in data_cached.columns:
-        data_cached["代码"] = data_cached["代码"].astype(str).str.zfill(6)
+        data_cached["代码"] = data_cached["代码"].map(normalize_symbol)
     if len(data_cached) < min_rows:
         log(f"跳过行情快照：{path} 只有 {len(data_cached)} 条，少于 {min_rows} 条")
         return None
@@ -251,7 +278,7 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
         cached = read_csv_cache(cache_path)
         if cached is not None and not cached.empty:
             if "代码" in cached.columns:
-                cached["代码"] = cached["代码"].astype(str).str.zfill(6)
+                cached["代码"] = cached["代码"].map(normalize_symbol)
             log(f"读取行情缓存：{cache_path}")
             write_csv(cached, data_path)
             return cached
@@ -285,7 +312,7 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
     if missing:
         raise RuntimeError(f"实时行情缺少字段：{sorted(missing)}；实际字段：{spot.columns.tolist()}")
 
-    spot["代码"] = spot["代码"].astype(str).str.zfill(6)
+    spot["代码"] = spot["代码"].map(normalize_symbol)
     spot = fill_latest_price_from_previous_close(spot)
     spot = spot[pd.to_numeric(spot["最新价"], errors="coerce") > 0].copy()
     if len(spot) < MIN_USABLE_SPOT_ROWS:
@@ -333,10 +360,7 @@ def normalize_spot_akshare_fallback(raw: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError(f"备用实时行情字段异常：{df.columns.tolist()}")
     df["代码"] = (
         df["代码"]
-        .astype(str)
-        .str.extract(r"(\d{6})", expand=False)
-        .fillna("")
-        .str.zfill(6)
+        .map(normalize_symbol)
     )
     rename_map = {
         "买入": "买入",
@@ -444,11 +468,12 @@ def fetch_spot_eastmoney(config: ScreenConfig) -> pd.DataFrame:
     df = df[keep_cols].copy()
     for col in [c for c in keep_cols if c not in {"代码", "名称"}]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["代码"] = df["代码"].astype(str).str.zfill(6)
+    df["代码"] = df["代码"].map(normalize_symbol)
     return df
 
 
 def fetch_baidu_valuation_history(symbol: str, indicator: str, config: ScreenConfig) -> pd.DataFrame:
+    symbol = normalize_symbol(symbol)
     safe_indicator = "pe" if "盈" in indicator else "pb"
     cache_path = config.cache_dir / "valuation" / f"{symbol}_{safe_indicator}_{today_stamp()}.csv"
     if not config.refresh and is_cache_fresh(cache_path):
@@ -468,6 +493,7 @@ def fetch_baidu_valuation_history(symbol: str, indicator: str, config: ScreenCon
 
 
 def fetch_value_history_em(symbol: str, config: ScreenConfig) -> pd.DataFrame:
+    symbol = normalize_symbol(symbol)
     cache_path = config.cache_dir / "value" / f"{symbol}_{today_stamp()}.csv"
     if not config.refresh and is_cache_fresh(cache_path):
         cached = read_csv_cache(cache_path)
@@ -486,6 +512,7 @@ def fetch_value_history_em(symbol: str, config: ScreenConfig) -> pd.DataFrame:
 
 
 def legacy_value_cache_path(symbol: str, config: ScreenConfig) -> Path | None:
+    symbol = normalize_symbol(symbol)
     value_dir = config.cache_dir / "value"
     if not value_dir.exists():
         return None
@@ -493,12 +520,13 @@ def legacy_value_cache_path(symbol: str, config: ScreenConfig) -> Path | None:
     return matches[0] if matches else None
 
 
-def spot_to_value_row(row: pd.Series) -> dict:
+def spot_to_value_row(row: pd.Series, data_date: date | None = None) -> dict:
     pe_ttm = to_float(row.get("市盈率TTM"))
     if pe_ttm is None:
         pe_ttm = to_float(row.get("市盈率-动态"))
+    data_date = data_date or current_market_data_date()
     return {
-        "数据日期": date.today().isoformat(),
+        "数据日期": data_date.isoformat(),
         "当日收盘价": to_float(row.get("最新价")),
         "当日涨跌幅": to_float(row.get("涨跌幅")),
         "总市值": to_float(row.get("总市值")),
@@ -545,8 +573,41 @@ def normalize_value_history(df: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
+def extend_today_value_row_from_history(
+    today_row: dict,
+    history: pd.DataFrame,
+    data_date: date | None = None,
+) -> dict:
+    latest_price = to_float(today_row.get("当日收盘价"))
+    if latest_price is None or latest_price <= 0 or history.empty:
+        return today_row
+    data_date = data_date or current_market_data_date()
+
+    work = history.copy()
+    work["数据日期"] = pd.to_datetime(work["数据日期"], errors="coerce")
+    work["当日收盘价"] = pd.to_numeric(work["当日收盘价"], errors="coerce")
+    work = work[(work["数据日期"].notna()) & (work["当日收盘价"] > 0)].sort_values("数据日期")
+    if work.empty:
+        return today_row
+
+    scalable_cols = ["总市值", "流通市值", "PE(TTM)", "PE(静)", "市净率", "市现率", "市销率"]
+    for col in scalable_cols:
+        if col not in work.columns or to_float(today_row.get(col)) is not None:
+            continue
+        metric = work[["数据日期", "当日收盘价", col]].copy()
+        metric[col] = pd.to_numeric(metric[col], errors="coerce")
+        metric = metric[(metric["当日收盘价"] > 0) & (metric[col].notna()) & (metric[col] > 0)]
+        if metric.empty:
+            continue
+        base = metric.iloc[-1]
+        today_row[col] = float(base[col]) * latest_price / float(base["当日收盘价"])
+
+    today_row["数据日期"] = data_date.isoformat()
+    return today_row
+
+
 def fetch_incremental_value_history(row: pd.Series, config: ScreenConfig) -> pd.DataFrame:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     data_path = config.data_dir / "value_history" / f"{symbol}.csv"
 
     history = None if config.rebuild_history else read_csv(data_path)
@@ -563,7 +624,10 @@ def fetch_incremental_value_history(row: pd.Series, config: ScreenConfig) -> pd.
         log(f"初始化历史库：{symbol} <- stock_value_em")
 
     history = normalize_value_history(history)
-    today_row = pd.DataFrame([spot_to_value_row(row)])
+    data_date = current_market_data_date()
+    today_row = pd.DataFrame(
+        [extend_today_value_row_from_history(spot_to_value_row(row, data_date), history, data_date)]
+    )
     history = normalize_value_history(
         pd.concat(
             [history.dropna(axis=1, how="all"), today_row.dropna(axis=1, how="all")],
@@ -665,7 +729,7 @@ def dividend_yield_ttm(symbol: str, latest_price: float | None, config: ScreenCo
 
 
 def valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     latest_price = to_float(row.get("最新价"))
     try:
         pe_error = ""
@@ -724,9 +788,25 @@ def is_probable_trading_day(day: date | None = None) -> bool:
     return day.weekday() < 5
 
 
+def previous_probable_trading_day(day: date) -> date:
+    current = day - timedelta(days=1)
+    while not is_probable_trading_day(current):
+        current -= timedelta(days=1)
+    return current
+
+
+def current_market_data_date(now: datetime | None = None) -> date:
+    now = now or datetime.now()
+    current_day = now.date()
+    if is_probable_trading_day(current_day) and (now.hour, now.minute) >= (15, 5):
+        return current_day
+    return previous_probable_trading_day(current_day)
+
+
 def append_latest_price_to_history(
     history: pd.DataFrame,
     latest_price: float,
+    data_date: date | None = None,
 ) -> pd.DataFrame:
     date_col = pick_column(history.columns, ["日期", "date"])
     close_col = pick_column(history.columns, ["收盘", "close"])
@@ -734,13 +814,13 @@ def append_latest_price_to_history(
         raise RuntimeError(f"本地价格历史缺少日期或收盘字段：{history.columns.tolist()}")
 
     work = history.copy()
-    today = date.today()
-    today_text = today.isoformat()
+    data_date = data_date or current_market_data_date()
+    today_text = data_date.isoformat()
     if today_text not in set(work[date_col].astype(str)):
-        row = {col: None for col in work.columns}
-        row[date_col] = today_text
-        row[close_col] = latest_price
-        work = pd.concat([work, pd.DataFrame([row])], ignore_index=True)
+        row_idx = len(work)
+        work.loc[row_idx, :] = pd.NA
+        work.loc[row_idx, date_col] = today_text
+        work.loc[row_idx, close_col] = latest_price
 
     work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
     work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
@@ -751,7 +831,7 @@ def append_latest_price_to_history(
 
 
 def price_history_data_path(symbol: str, config: ScreenConfig) -> Path:
-    return config.data_dir / "price_history_qfq" / f"{str(symbol).zfill(6)}.csv"
+    return config.data_dir / "price_history_qfq" / f"{normalize_symbol(symbol)}.csv"
 
 
 def has_cached_price_history(symbol: str, config: ScreenConfig) -> bool:
@@ -760,7 +840,7 @@ def has_cached_price_history(symbol: str, config: ScreenConfig) -> bool:
 
 
 def market_prefixed_symbol(symbol: str) -> str:
-    symbol = str(symbol).zfill(6)
+    symbol = normalize_symbol(symbol)
     if symbol.startswith(("4", "8", "9")):
         return f"bj{symbol}"
     if symbol.startswith("6"):
@@ -781,7 +861,7 @@ def fetch_price_history_sina(symbol: str, start: date, end: date) -> pd.DataFram
 
 
 def fetch_price_history_tencent(symbol: str, start: date, end: date, timeout: float) -> pd.DataFrame:
-    if str(symbol).zfill(6).startswith(("4", "8", "9")):
+    if normalize_symbol(symbol).startswith(("4", "8", "9")):
         raise RuntimeError("腾讯前复权价格暂不支持北交所代码")
     df = ak.stock_zh_a_hist_tx(
         symbol=market_prefixed_symbol(symbol),
@@ -797,7 +877,7 @@ def fetch_price_history_tencent(symbol: str, start: date, end: date, timeout: fl
 
 def fetch_price_history_eastmoney(symbol: str, start: date, end: date) -> pd.DataFrame:
     df = ak.stock_zh_a_hist(
-        symbol=symbol,
+        symbol=normalize_symbol(symbol),
         period="daily",
         start_date=start.strftime("%Y%m%d"),
         end_date=end.strftime("%Y%m%d"),
@@ -814,6 +894,8 @@ def fetch_price_history(
     config: ScreenConfig,
     latest_price: float | None = None,
 ) -> pd.DataFrame:
+    symbol = normalize_symbol(symbol)
+    data_date = current_market_data_date()
     data_path = price_history_data_path(symbol, config)
     cache_path = config.cache_dir / "price_qfq" / f"{symbol}_{today_stamp()}.csv"
     if not config.refresh and is_cache_fresh(cache_path):
@@ -827,7 +909,7 @@ def fetch_price_history(
         close_col = pick_column(data_cached.columns, ["收盘", "close"])
         if date_col is not None and close_col is not None:
             latest_date = pd.to_datetime(data_cached[date_col], errors="coerce").max()
-            if pd.notna(latest_date) and latest_date.date() >= date.today():
+            if pd.notna(latest_date) and latest_date.date() >= data_date:
                 write_csv_cache(data_cached, cache_path)
                 return data_cached
 
@@ -835,10 +917,10 @@ def fetch_price_history(
             if (
                 latest_price_value is not None
                 and latest_price_value > 0
-                and is_probable_trading_day()
-                and (pd.isna(latest_date) or latest_date.date() < date.today())
+                and is_probable_trading_day(data_date)
+                and (pd.isna(latest_date) or latest_date.date() < data_date)
             ):
-                updated = append_latest_price_to_history(data_cached, latest_price_value)
+                updated = append_latest_price_to_history(data_cached, latest_price_value, data_date)
                 write_csv_cache(updated, cache_path)
                 write_csv(updated, data_path)
                 return updated
@@ -847,7 +929,7 @@ def fetch_price_history(
                 write_csv_cache(data_cached, cache_path)
                 return data_cached
 
-    end = date.today()
+    end = data_date
     start = end - timedelta(days=max(420, config.price_window * 3))
     source_errors = []
     sources = [
@@ -871,7 +953,7 @@ def fetch_price_history(
 
 
 def local_price_prescreen_metrics(row: pd.Series, config: ScreenConfig) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     latest_price = to_float(row.get("最新价"))
     cached_qfq = has_cached_price_history(symbol, config)
     base = {
@@ -933,7 +1015,7 @@ def local_price_prescreen_metrics(row: pd.Series, config: ScreenConfig) -> dict:
 
 
 def price_metrics(row: pd.Series, config: ScreenConfig) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     try:
         latest_price = to_float(row.get("最新价"))
         df = fetch_price_history(symbol, config, latest_price=latest_price)
@@ -975,7 +1057,7 @@ def price_metrics(row: pd.Series, config: ScreenConfig) -> dict:
 
 
 def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     price_result = price_metrics(row, config)
     latest_price = price_result.get("现价")
     if has_text(price_result.get("价格错误")):
@@ -1136,7 +1218,7 @@ def price_valuation_metrics(row: pd.Series, config: ScreenConfig) -> dict:
 
 
 def dividend_metrics(row: pd.Series, config: ScreenConfig) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     latest_price = to_float(row.get("现价"))
     try:
         dividend_yield, dividend_date = dividend_yield_ttm(symbol, latest_price, config)
@@ -1157,7 +1239,64 @@ def dividend_metrics(row: pd.Series, config: ScreenConfig) -> dict:
             "股息错误": str(exc)[:300],
         }
 
+
+def is_valid_industry(value) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and text.lower() != "nan" and text != "未知"
+
+
+def fetch_industry_eastmoney(symbol: str, config: ScreenConfig) -> str:
+    def load() -> pd.DataFrame:
+        df = ak.stock_individual_info_em(symbol=symbol, timeout=10)
+        if df is None or df.empty or not {"item", "value"}.issubset(df.columns):
+            raise RuntimeError("个股信息为空或字段异常")
+        return df
+
+    df = fetch_with_retries(f"{symbol} 个股信息", config, load)
+    industry_rows = df[df["item"].astype(str) == "行业"]
+    if industry_rows.empty:
+        raise RuntimeError("个股信息未返回行业字段")
+    industry = str(industry_rows.iloc[0]["value"]).strip()
+    if not is_valid_industry(industry):
+        raise RuntimeError("个股信息行业为空")
+    return industry
+
+
+def fetch_industry_cninfo(symbol: str, config: ScreenConfig) -> str:
+    def load() -> pd.DataFrame:
+        df = ak.stock_industry_change_cninfo(
+            symbol=symbol,
+            start_date="19900101",
+            end_date=today_stamp(),
+        )
+        if df is None or df.empty:
+            raise RuntimeError("巨潮行业归属为空")
+        return df
+
+    df = fetch_with_retries(f"{symbol} 巨潮行业归属", config, load)
+    work = df.copy()
+    if "变更日期" in work.columns:
+        work["变更日期"] = pd.to_datetime(work["变更日期"], errors="coerce")
+        work = work.sort_values("变更日期")
+
+    preferred = pd.DataFrame()
+    if "分类标准" in work.columns:
+        preferred = work[work["分类标准"].astype(str).str.contains("申银万国", na=False)]
+    if preferred.empty and "分类标准" in work.columns:
+        preferred = work[work["分类标准"].astype(str).str.contains("巨潮", na=False)]
+    if preferred.empty:
+        preferred = work
+
+    latest = preferred.iloc[-1]
+    for col in ["行业大类", "行业中类", "行业次类", "行业门类"]:
+        industry = latest.get(col)
+        if is_valid_industry(industry):
+            return str(industry).strip()
+    raise RuntimeError("巨潮行业归属缺少可用行业字段")
+
+
 def industry_for_symbol(symbol: str, config: ScreenConfig) -> dict:
+    symbol = normalize_symbol(symbol)
     data_path = config.data_dir / "industry" / f"{symbol}.csv"
     if not config.refresh:
         data_cached = read_csv(data_path)
@@ -1171,21 +1310,24 @@ def industry_for_symbol(symbol: str, config: ScreenConfig) -> dict:
             write_csv(cached, data_path)
             return {"代码": symbol, "所属行业": str(cached.iloc[0]["所属行业"]), "行业错误": ""}
 
+    errors = []
     try:
-        def load() -> pd.DataFrame:
-            df = ak.stock_individual_info_em(symbol=symbol, timeout=10)
-            if df is None or df.empty or not {"item", "value"}.issubset(df.columns):
-                raise RuntimeError("个股信息为空或字段异常")
-            return df
+        industry = fetch_industry_eastmoney(symbol, config)
+    except Exception as exc:
+        errors.append(f"东方财富: {exc}")
+        try:
+            industry = fetch_industry_cninfo(symbol, config)
+        except Exception as fallback_exc:
+            errors.append(f"巨潮: {fallback_exc}")
+            return {"代码": symbol, "所属行业": "未知", "行业错误": "；".join(errors)[:200]}
 
-        df = fetch_with_retries(f"{symbol} 个股信息", config, load)
-        industry_rows = df[df["item"].astype(str) == "行业"]
-        industry = str(industry_rows.iloc[0]["value"]) if not industry_rows.empty else "未知"
+    write_errors = []
+    try:
         write_csv_cache(pd.DataFrame([{"所属行业": industry}]), cache_path)
         write_csv(pd.DataFrame([{"所属行业": industry}]), data_path)
-        return {"代码": symbol, "所属行业": industry, "行业错误": ""}
     except Exception as exc:
-        return {"代码": symbol, "所属行业": "未知", "行业错误": str(exc)[:200]}
+        write_errors.append(f"缓存写入: {exc}")
+    return {"代码": symbol, "所属行业": industry, "行业错误": "；".join(write_errors)[:200] if write_errors else ""}
 
 
 def parallel_map(
@@ -1232,7 +1374,7 @@ def parallel_map(
 
 
 def skipped_price_valuation_result(row: pd.Series, reason) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     error = str(reason)[:300]
     return {
         "代码": symbol,
@@ -1256,7 +1398,7 @@ def skipped_price_valuation_result(row: pd.Series, reason) -> dict:
 
 
 def skipped_price_prescreen_result(row: pd.Series, reason) -> dict:
-    symbol = str(row["代码"]).zfill(6)
+    symbol = normalize_symbol(row["代码"])
     return {
         "代码": symbol,
         "本地半年线": None,
@@ -1269,7 +1411,7 @@ def skipped_price_prescreen_result(row: pd.Series, reason) -> dict:
 
 def skipped_dividend_result(row: pd.Series, reason) -> dict:
     return {
-        "代码": str(row["代码"]).zfill(6),
+        "代码": normalize_symbol(row["代码"]),
         "股息率": None,
         "股息率达标": False,
         "股息数据日期": "",
@@ -1279,7 +1421,7 @@ def skipped_dividend_result(row: pd.Series, reason) -> dict:
 
 def skipped_industry_result(symbol: str, reason) -> dict:
     return {
-        "代码": str(symbol).zfill(6),
+        "代码": normalize_symbol(symbol),
         "所属行业": "未知",
         "行业错误": str(reason)[:200],
     }
@@ -1333,8 +1475,7 @@ def retry_price_valuation_failures(
     for retry_idx in range(retry_rounds):
         retry_codes = set(
             values.loc[values["价格错误"].map(is_retryable_stock_error), "代码"]
-            .astype(str)
-            .str.zfill(6)
+            .map(normalize_symbol)
         )
         if not retry_codes:
             break
@@ -1357,7 +1498,7 @@ def retry_price_valuation_failures(
             break
         retry_values = ensure_price_valuation_columns(retry_values)
         retried_count += len(retry_values)
-        retry_values["代码"] = retry_values["代码"].astype(str).str.zfill(6)
+        retry_values["代码"] = retry_values["代码"].map(normalize_symbol)
         values = pd.concat(
             [values[~values["代码"].isin(retry_codes)], retry_values],
             ignore_index=True,
@@ -1374,7 +1515,7 @@ def add_failure_records(records: list[dict], df: pd.DataFrame, stage: str, error
             {
                 "日期": date.today().isoformat(),
                 "阶段": stage,
-                "代码": str(row.get("代码", "")).zfill(6),
+                "代码": normalize_symbol(row.get("代码", "")),
                 "名称": str(row.get("名称", "")),
                 "错误": error,
                 "建议重试": "是" if is_retryable_stock_error(error) else "否",
@@ -1447,7 +1588,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         diagnostics["price_error_count"] = len(spot)
         return prescreen, diagnostics
     if "代码" in prescreen.columns:
-        prescreen["代码"] = prescreen["代码"].astype(str).str.zfill(6)
+        prescreen["代码"] = prescreen["代码"].map(normalize_symbol)
     for col in ["价格预筛达标", "前复权历史已缓存"]:
         if col not in prescreen.columns:
             prescreen[col] = False
@@ -1457,8 +1598,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     prescreen["价格预筛错误"] = prescreen["价格预筛错误"].fillna("")
     candidate_codes = set(
         prescreen.loc[prescreen["价格预筛达标"] | prescreen["前复权历史已缓存"], "代码"]
-        .astype(str)
-        .str.zfill(6)
+        .map(normalize_symbol)
     )
     diagnostics["price_prescreen_candidate_count"] = len(candidate_codes)
     diagnostics["price_prescreen_error_count"] = int(prescreen["价格预筛错误"].map(has_text).sum())
@@ -1483,7 +1623,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         return values, diagnostics
     values = ensure_price_valuation_columns(values)
     if "代码" in values.columns:
-        values["代码"] = values["代码"].astype(str).str.zfill(6)
+        values["代码"] = values["代码"].map(normalize_symbol)
     values, retried_count = retry_price_valuation_failures(candidate_spot, values, config)
     diagnostics["price_retry_count"] = retried_count
     diagnostics["price_error_count"] = int(values["价格错误"].map(has_text).sum())
@@ -1540,7 +1680,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     )
     dividends = pd.DataFrame(dividend_rows)
     if "代码" in dividends.columns:
-        dividends["代码"] = dividends["代码"].astype(str).str.zfill(6)
+        dividends["代码"] = dividends["代码"].map(normalize_symbol)
     diagnostics["dividend_error_count"] = int(dividends["股息错误"].map(has_text).sum())
     dividend_failure_source = price_prefiltered[["代码", "名称"]].merge(
         dividends[["代码", "股息错误"]],
@@ -1746,7 +1886,7 @@ def fetch_bj_market_volume_history(config: ScreenConfig) -> pd.DataFrame:
     if code_col is None:
         raise RuntimeError("北交所股票列表缺少代码字段")
 
-    symbols = sorted({str(code).strip().zfill(6) for code in codes_df[code_col].dropna()})
+    symbols = sorted({normalize_symbol(code) for code in codes_df[code_col].dropna()})
     histories = parallel_map(
         "北交所成交量",
         symbols,

@@ -58,7 +58,8 @@ def test_default_live_fetching_prefers_stability():
     assert config.request_pause == 0.5
     assert config.request_retries == 3
     assert config.failed_item_retries == 1
-    assert config.batch_timeout_seconds == 18000.0
+    assert config.batch_timeout_seconds == 7200.0
+    assert config.price_prescreen_margin_pct == 0.0
 
 
 def test_normalize_spot_akshare_fallback_strips_market_prefixes():
@@ -146,6 +147,35 @@ def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_p
     fetch_price_history("300501", config)
 
     assert calls["adjust"] == "qfq"
+
+
+def test_local_price_prescreen_uses_cached_value_history(tmp_path):
+    config = ScreenConfig(
+        cache_dir=tmp_path / "cache",
+        data_dir=tmp_path / "data",
+        price_window=3,
+        max_below_ma_pct=-10.0,
+    )
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+    path = config.data_dir / "value_history" / "300501.csv"
+    history = pd.DataFrame(
+        {
+            "数据日期": ["2026-05-09", "2026-05-10", "2026-05-11"],
+            "当日收盘价": [10.0, 10.0, 10.0],
+        }
+    )
+    history.to_csv(path, index=False, encoding="utf-8-sig")
+
+    result = dashboard.local_price_prescreen_metrics(
+        pd.Series({"代码": "300501", "名称": "海顺新材", "最新价": 8.5}),
+        config,
+    )
+
+    assert result["价格预筛达标"] is True
+    assert result["本地半年线"] == pytest.approx(9.5)
+    assert result["本地半年线乖离率"] == pytest.approx(-10.526315789)
+    assert not (config.data_dir / "price_history_qfq" / "300501.csv").exists()
 
 
 def test_fetch_price_history_uses_local_history_when_refreshing(monkeypatch, tmp_path):

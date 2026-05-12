@@ -58,7 +58,8 @@ class ScreenConfig:
     request_retries: int = 3
     retry_backoff: float = 1.5
     failed_item_retries: int = 1
-    batch_timeout_seconds: float = 18000.0
+    batch_timeout_seconds: float = 7200.0
+    price_prescreen_margin_pct: float = 0.0
     limit: int | None = None
     refresh: bool = False
     rebuild_history: bool = False
@@ -749,12 +750,21 @@ def append_latest_price_to_history(
     return work
 
 
+def price_history_data_path(symbol: str, config: ScreenConfig) -> Path:
+    return config.data_dir / "price_history_qfq" / f"{str(symbol).zfill(6)}.csv"
+
+
+def has_cached_price_history(symbol: str, config: ScreenConfig) -> bool:
+    path = price_history_data_path(symbol, config)
+    return path.exists() and path.stat().st_size > 0
+
+
 def fetch_price_history(
     symbol: str,
     config: ScreenConfig,
     latest_price: float | None = None,
 ) -> pd.DataFrame:
-    data_path = config.data_dir / "price_history_qfq" / f"{symbol}.csv"
+    data_path = price_history_data_path(symbol, config)
     cache_path = config.cache_dir / "price_qfq" / f"{symbol}_{today_stamp()}.csv"
     if not config.refresh and is_cache_fresh(cache_path):
         cached = read_csv_cache(cache_path)
@@ -806,6 +816,68 @@ def fetch_price_history(
     write_csv_cache(df, cache_path)
     write_csv(df, data_path)
     return df
+
+
+def local_price_prescreen_metrics(row: pd.Series, config: ScreenConfig) -> dict:
+    symbol = str(row["代码"]).zfill(6)
+    latest_price = to_float(row.get("最新价"))
+    cached_qfq = has_cached_price_history(symbol, config)
+    base = {
+        "代码": symbol,
+        "本地半年线": None,
+        "本地半年线乖离率": None,
+        "价格预筛达标": cached_qfq,
+        "前复权历史已缓存": cached_qfq,
+        "价格预筛错误": "",
+    }
+    try:
+        data_path = config.data_dir / "value_history" / f"{symbol}.csv"
+        history = read_csv(data_path)
+        if history is None or history.empty:
+            raise RuntimeError("本地估值历史缺失")
+
+        history = normalize_value_history(history)
+        if latest_price is not None and latest_price > 0:
+            today_row = pd.DataFrame([spot_to_value_row(row)])
+            history = normalize_value_history(
+                pd.concat(
+                    [history.dropna(axis=1, how="all"), today_row.dropna(axis=1, how="all")],
+                    ignore_index=True,
+                )
+            )
+
+        close_col = pick_column(history.columns, ["当日收盘价", "close"])
+        date_col = pick_column(history.columns, ["数据日期", "date", "日期"])
+        if close_col is None:
+            raise RuntimeError(f"本地估值历史缺少收盘价字段：{history.columns.tolist()}")
+        work = history.copy()
+        if date_col is not None:
+            work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+            work = work[work[date_col].notna()].sort_values(date_col)
+        work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
+        work = work[work[close_col].notna()].copy()
+        if len(work) < config.price_window:
+            raise RuntimeError(f"本地估值历史不足 {config.price_window}：{len(work)}")
+
+        ma = float(work[close_col].tail(config.price_window).mean())
+        if latest_price is None:
+            latest_price = float(work[close_col].iloc[-1])
+        if latest_price is None or latest_price <= 0 or ma <= 0:
+            raise RuntimeError("本地价格预筛缺少有效现价或均线")
+
+        deviation = (latest_price / ma - 1) * 100
+        threshold = config.max_below_ma_pct + max(0.0, float(config.price_prescreen_margin_pct))
+        base.update(
+            {
+                "本地半年线": ma,
+                "本地半年线乖离率": deviation,
+                "价格预筛达标": bool(deviation <= threshold or cached_qfq),
+            }
+        )
+        return base
+    except Exception as exc:
+        base["价格预筛错误"] = "" if cached_qfq else str(exc)[:300]
+        return base
 
 
 def price_metrics(row: pd.Series, config: ScreenConfig) -> dict:
@@ -1131,6 +1203,18 @@ def skipped_price_valuation_result(row: pd.Series, reason) -> dict:
     }
 
 
+def skipped_price_prescreen_result(row: pd.Series, reason) -> dict:
+    symbol = str(row["代码"]).zfill(6)
+    return {
+        "代码": symbol,
+        "本地半年线": None,
+        "本地半年线乖离率": None,
+        "价格预筛达标": False,
+        "前复权历史已缓存": False,
+        "价格预筛错误": str(reason)[:300],
+    }
+
+
 def skipped_dividend_result(row: pd.Series, reason) -> dict:
     return {
         "代码": str(row["代码"]).zfill(6),
@@ -1277,6 +1361,8 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         "valuation_incomplete_count": 0,
         "history_short_count": 0,
         "price_retry_count": 0,
+        "price_prescreen_candidate_count": 0,
+        "price_prescreen_error_count": 0,
         "dividend_error_count": 0,
         "industry_error_count": 0,
         "valuation_prefilter_count": 0,
@@ -1287,9 +1373,44 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     }
     failure_records: list[dict] = []
 
+    prescreen_rows = parallel_map(
+        "本地价格预筛",
+        [row for _, row in spot.iterrows()],
+        lambda row: local_price_prescreen_metrics(row, config),
+        max_workers=max(1, config.price_workers),
+        timeout_seconds=min(config.batch_timeout_seconds, 900),
+        timeout_result=skipped_price_prescreen_result,
+        error_result=skipped_price_prescreen_result,
+    )
+    prescreen = pd.DataFrame(prescreen_rows)
+    if prescreen.empty:
+        diagnostics["price_error_count"] = len(spot)
+        return prescreen, diagnostics
+    if "代码" in prescreen.columns:
+        prescreen["代码"] = prescreen["代码"].astype(str).str.zfill(6)
+    for col in ["价格预筛达标", "前复权历史已缓存"]:
+        if col not in prescreen.columns:
+            prescreen[col] = False
+        prescreen[col] = prescreen[col].fillna(False).astype(bool)
+    if "价格预筛错误" not in prescreen.columns:
+        prescreen["价格预筛错误"] = ""
+    prescreen["价格预筛错误"] = prescreen["价格预筛错误"].fillna("")
+    candidate_codes = set(
+        prescreen.loc[prescreen["价格预筛达标"] | prescreen["前复权历史已缓存"], "代码"]
+        .astype(str)
+        .str.zfill(6)
+    )
+    diagnostics["price_prescreen_candidate_count"] = len(candidate_codes)
+    diagnostics["price_prescreen_error_count"] = int(prescreen["价格预筛错误"].map(has_text).sum())
+    log(f"前复权确认候选：{len(candidate_codes)}/{len(spot)} 条（本地预筛或已有前复权缓存）")
+    if not candidate_codes:
+        write_failure_report(failure_records, config, diagnostics)
+        return pd.DataFrame(), diagnostics
+    candidate_spot = spot[spot["代码"].isin(candidate_codes)].copy()
+
     value_rows = parallel_map(
         "半年线与估值",
-        [row for _, row in spot.iterrows()],
+        [row for _, row in candidate_spot.iterrows()],
         lambda row: price_valuation_metrics(row, config),
         max_workers=max(1, config.price_workers),
         timeout_seconds=config.batch_timeout_seconds,
@@ -1303,13 +1424,13 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     values = ensure_price_valuation_columns(values)
     if "代码" in values.columns:
         values["代码"] = values["代码"].astype(str).str.zfill(6)
-    values, retried_count = retry_price_valuation_failures(spot, values, config)
+    values, retried_count = retry_price_valuation_failures(candidate_spot, values, config)
     diagnostics["price_retry_count"] = retried_count
     diagnostics["price_error_count"] = int(values["价格错误"].map(has_text).sum())
     diagnostics["valuation_incomplete_count"] = int(values["估值错误"].map(has_text).sum())
     diagnostics["history_short_count"] = int(values["价格错误"].astype(str).str.contains("历史交易日不足", regex=False).sum())
 
-    value_failure_source = spot[["代码", "名称"]].merge(
+    value_failure_source = candidate_spot[["代码", "名称"]].merge(
         values[["代码", "价格错误", "估值错误", "数据状态"]],
         on="代码",
         how="left",
@@ -2321,7 +2442,7 @@ def build_html(
         <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
         <div class="meta">
           生成时间：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
-          价格预筛：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格失败：{diagnostics.get("price_error_count", 0)}；历史不足：{diagnostics.get("history_short_count", 0)}；估值缺失：{diagnostics.get("valuation_incomplete_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}；重试股票：{diagnostics.get("price_retry_count", 0)}
+          本地候选：{diagnostics.get("price_prescreen_candidate_count", 0)}；前复权达标：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格失败：{diagnostics.get("price_error_count", 0)}；历史不足：{diagnostics.get("history_short_count", 0)}；估值缺失：{diagnostics.get("valuation_incomplete_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}；重试股票：{diagnostics.get("price_retry_count", 0)}
         </div>
       </div>
       {warning}
@@ -2471,7 +2592,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-retries", type=int, default=3, help="外部接口失败后的重试次数，默认 3")
     parser.add_argument("--retry-backoff", type=float, default=1.5, help="接口重试等待时间倍率，默认 1.5")
     parser.add_argument("--failed-item-retries", type=int, default=1, help="批量结束后对失败股票额外重试轮数，默认 1")
-    parser.add_argument("--batch-timeout-seconds", type=float, default=18000.0, help="单个批量阶段最长等待秒数，超时后跳过剩余项")
+    parser.add_argument("--batch-timeout-seconds", type=float, default=7200.0, help="单个批量阶段最长等待秒数，超时后跳过剩余项")
+    parser.add_argument("--price-prescreen-margin-pct", type=float, default=0.0, help="本地价格预筛相对正式阈值放宽百分点，默认 0")
     parser.add_argument("--dividend-lookback-days", type=int, default=365, help="股息率回看天数，默认 365")
     parser.add_argument("--monitor-days", type=int, default=90, help="市场监测自然日窗口，默认 90 天")
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 只股票，调试用")
@@ -2500,6 +2622,7 @@ def main() -> int:
         retry_backoff=args.retry_backoff,
         failed_item_retries=args.failed_item_retries,
         batch_timeout_seconds=args.batch_timeout_seconds,
+        price_prescreen_margin_pct=args.price_prescreen_margin_pct,
         dividend_lookback_days=args.dividend_lookback_days,
         monitor_days=args.monitor_days,
         limit=args.limit,

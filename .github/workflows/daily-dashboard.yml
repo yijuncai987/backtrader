@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,7 +52,8 @@ jobs:
             --request-pause 0.8 \
             --request-retries 4 \
             --spot-timeout 30 \
-            --batch-timeout-seconds 18000
+            --batch-timeout-seconds 7200 \
+            --price-prescreen-margin-pct 0
 
       - name: Commit updated dashboard data
         run: |

@@ -274,9 +274,27 @@ def fetch_spot(config: ScreenConfig) -> pd.DataFrame:
         raise RuntimeError(f"实时行情缺少字段：{sorted(missing)}；实际字段：{spot.columns.tolist()}")
 
     spot["代码"] = spot["代码"].astype(str).str.zfill(6)
+    spot = fill_latest_price_from_previous_close(spot)
     spot = spot[pd.to_numeric(spot["最新价"], errors="coerce") > 0].copy()
     write_csv_cache(spot, cache_path)
     write_csv(spot, data_path)
+    return spot
+
+
+def fill_latest_price_from_previous_close(spot: pd.DataFrame) -> pd.DataFrame:
+    spot = spot.copy()
+    if "最新价" not in spot.columns:
+        return spot
+    latest = pd.to_numeric(spot["最新价"], errors="coerce")
+    fallback = None
+    for col in ["昨收", "收盘", "买入", "卖出"]:
+        if col in spot.columns:
+            candidate = pd.to_numeric(spot[col], errors="coerce")
+            fallback = candidate if fallback is None else fallback.combine_first(candidate)
+    if fallback is None:
+        spot["最新价"] = latest
+        return spot
+    spot["最新价"] = latest.mask((latest.isna()) | (latest <= 0), fallback)
     return spot
 
 

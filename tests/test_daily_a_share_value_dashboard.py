@@ -15,6 +15,7 @@ from daily_a_share_value_dashboard import (  # noqa: E402
     demo_screen,
     ensure_cache_dir,
     ensure_data_dir,
+    fill_latest_price_from_previous_close,
     fetch_price_history,
     monitor_date_window,
     monitor_records_for_html,
@@ -72,6 +73,23 @@ def test_normalize_spot_akshare_fallback_strips_market_prefixes():
 
     assert normalized["代码"].tolist() == ["920000", "600000", "000001"]
     assert normalized["最新价"].tolist() == [16.24, 8.12, 9.82]
+
+
+def test_fill_latest_price_from_previous_close_keeps_premarket_rows():
+    raw = pd.DataFrame(
+        [
+            {"代码": "600000", "名称": "浦发银行", "最新价": 0, "昨收": 8.88},
+            {"代码": "000001", "名称": "平安银行", "最新价": None, "昨收": 9.91},
+            {"代码": "300501", "名称": "海顺新材", "最新价": 8.9, "昨收": 8.7},
+            {"代码": "688001", "名称": "华兴源创", "最新价": 0, "昨收": None},
+        ]
+    )
+
+    filled = fill_latest_price_from_previous_close(raw)
+    tradable = filled[pd.to_numeric(filled["最新价"], errors="coerce") > 0]
+
+    assert filled["最新价"].tolist()[:3] == [8.88, 9.91, 8.9]
+    assert tradable["代码"].tolist() == ["600000", "000001", "300501"]
 
 
 def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_path):

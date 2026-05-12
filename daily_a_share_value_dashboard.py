@@ -759,6 +759,56 @@ def has_cached_price_history(symbol: str, config: ScreenConfig) -> bool:
     return path.exists() and path.stat().st_size > 0
 
 
+def market_prefixed_symbol(symbol: str) -> str:
+    symbol = str(symbol).zfill(6)
+    if symbol.startswith(("4", "8", "9")):
+        return f"bj{symbol}"
+    if symbol.startswith("6"):
+        return f"sh{symbol}"
+    return f"sz{symbol}"
+
+
+def fetch_price_history_sina(symbol: str, start: date, end: date) -> pd.DataFrame:
+    df = ak.stock_zh_a_daily(
+        symbol=market_prefixed_symbol(symbol),
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+        adjust="qfq",
+    )
+    if df is None or df.empty:
+        raise RuntimeError("新浪前复权价格历史为空")
+    return df
+
+
+def fetch_price_history_tencent(symbol: str, start: date, end: date, timeout: float) -> pd.DataFrame:
+    if str(symbol).zfill(6).startswith(("4", "8", "9")):
+        raise RuntimeError("腾讯前复权价格暂不支持北交所代码")
+    df = ak.stock_zh_a_hist_tx(
+        symbol=market_prefixed_symbol(symbol),
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+        adjust="qfq",
+        timeout=timeout,
+    )
+    if df is None or df.empty:
+        raise RuntimeError("腾讯前复权价格历史为空")
+    return df
+
+
+def fetch_price_history_eastmoney(symbol: str, start: date, end: date) -> pd.DataFrame:
+    df = ak.stock_zh_a_hist(
+        symbol=symbol,
+        period="daily",
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+        adjust="qfq",
+        timeout=15,
+    )
+    if df is None or df.empty:
+        raise RuntimeError("东方财富前复权价格历史为空")
+    return df
+
+
 def fetch_price_history(
     symbol: str,
     config: ScreenConfig,
@@ -799,20 +849,22 @@ def fetch_price_history(
 
     end = date.today()
     start = end - timedelta(days=max(420, config.price_window * 3))
-    def load() -> pd.DataFrame:
-        df = ak.stock_zh_a_hist(
-            symbol=symbol,
-            period="daily",
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-            adjust="qfq",
-            timeout=15,
-        )
-        if df is None or df.empty:
-            raise RuntimeError("前复权价格历史为空")
-        return df
-
-    df = fetch_with_retries(f"{symbol} 前复权价格历史", config, load)
+    source_errors = []
+    sources = [
+        ("新浪", lambda: fetch_price_history_sina(symbol, start, end)),
+        ("腾讯", lambda: fetch_price_history_tencent(symbol, start, end, timeout=max(15, config.spot_timeout))),
+        ("东方财富", lambda: fetch_price_history_eastmoney(symbol, start, end)),
+    ]
+    df = None
+    for source_name, loader in sources:
+        try:
+            df = fetch_with_retries(f"{symbol} {source_name}前复权价格历史", config, loader)
+            log(f"{symbol} 前复权价格历史来源：{source_name}")
+            break
+        except Exception as exc:
+            source_errors.append(f"{source_name}: {exc}")
+    if df is None or df.empty:
+        raise RuntimeError("前复权价格历史失败；" + "；".join(source_errors))
     write_csv_cache(df, cache_path)
     write_csv(df, data_path)
     return df

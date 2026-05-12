@@ -152,11 +152,11 @@ def test_write_dashboard_preserves_existing_files_when_price_fetch_mostly_fails(
 def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_path):
     calls = {}
 
-    def fake_stock_zh_a_hist(**kwargs):
+    def fake_stock_zh_a_daily(**kwargs):
         calls.update(kwargs)
-        return pd.DataFrame({"日期": ["2026-05-11"], "收盘": [10.0]})
+        return pd.DataFrame({"date": ["2026-05-11"], "close": [10.0]})
 
-    monkeypatch.setattr(dashboard.ak, "stock_zh_a_hist", fake_stock_zh_a_hist)
+    monkeypatch.setattr(dashboard.ak, "stock_zh_a_daily", fake_stock_zh_a_daily)
     config = ScreenConfig(
         cache_dir=tmp_path / "cache",
         data_dir=tmp_path / "data",
@@ -169,6 +169,39 @@ def test_fetch_price_history_requests_forward_adjusted_prices(monkeypatch, tmp_p
     fetch_price_history("300501", config)
 
     assert calls["adjust"] == "qfq"
+    assert calls["symbol"] == "sz300501"
+
+
+def test_fetch_price_history_falls_back_to_tencent_when_sina_fails(monkeypatch, tmp_path):
+    calls = {}
+
+    def fail_stock_zh_a_daily(**kwargs):
+        raise RuntimeError("新浪断开")
+
+    def fake_stock_zh_a_hist_tx(**kwargs):
+        calls.update(kwargs)
+        return pd.DataFrame({"date": ["2026-05-11"], "close": [10.0]})
+
+    def fail_stock_zh_a_hist(**kwargs):
+        pytest.fail("Tencent fallback should avoid EastMoney when it succeeds")
+
+    monkeypatch.setattr(dashboard.ak, "stock_zh_a_daily", fail_stock_zh_a_daily)
+    monkeypatch.setattr(dashboard.ak, "stock_zh_a_hist_tx", fake_stock_zh_a_hist_tx)
+    monkeypatch.setattr(dashboard.ak, "stock_zh_a_hist", fail_stock_zh_a_hist)
+    config = ScreenConfig(
+        cache_dir=tmp_path / "cache",
+        data_dir=tmp_path / "data",
+        request_pause=0,
+        request_retries=0,
+    )
+    ensure_cache_dir(config.cache_dir)
+    ensure_data_dir(config.data_dir)
+
+    result = fetch_price_history("300501", config)
+
+    assert calls["adjust"] == "qfq"
+    assert calls["symbol"] == "sz300501"
+    assert result["close"].iloc[-1] == 10.0
 
 
 def test_local_price_prescreen_uses_cached_value_history(tmp_path):

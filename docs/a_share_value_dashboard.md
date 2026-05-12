@@ -107,7 +107,7 @@ python daily_a_share_value_dashboard.py ^
   --request-pause 0.5 ^
   --request-retries 3 ^
   --failed-item-retries 1 ^
-  --batch-timeout-seconds 12600 ^
+  --batch-timeout-seconds 18000 ^
   --price-window 120 ^
   --max-below-ma-pct -10 ^
   --min-dividend-yield-pct 3 ^

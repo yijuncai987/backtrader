@@ -56,7 +56,7 @@ def test_default_live_fetching_prefers_stability():
     assert config.request_pause == 0.5
     assert config.request_retries == 3
     assert config.failed_item_retries == 1
-    assert config.batch_timeout_seconds == 12600.0
+    assert config.batch_timeout_seconds == 18000.0
 
 
 def test_normalize_spot_akshare_fallback_strips_market_prefixes():

@@ -57,7 +57,7 @@ class ScreenConfig:
     request_retries: int = 3
     retry_backoff: float = 1.5
     failed_item_retries: int = 1
-    batch_timeout_seconds: float = 12600.0
+    batch_timeout_seconds: float = 18000.0
     limit: int | None = None
     refresh: bool = False
     rebuild_history: bool = False
@@ -2417,7 +2417,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-retries", type=int, default=3, help="外部接口失败后的重试次数，默认 3")
     parser.add_argument("--retry-backoff", type=float, default=1.5, help="接口重试等待时间倍率，默认 1.5")
     parser.add_argument("--failed-item-retries", type=int, default=1, help="批量结束后对失败股票额外重试轮数，默认 1")
-    parser.add_argument("--batch-timeout-seconds", type=float, default=12600.0, help="单个批量阶段最长等待秒数，超时后跳过剩余项")
+    parser.add_argument("--batch-timeout-seconds", type=float, default=18000.0, help="单个批量阶段最长等待秒数，超时后跳过剩余项")
     parser.add_argument("--dividend-lookback-days", type=int, default=365, help="股息率回看天数，默认 365")
     parser.add_argument("--monitor-days", type=int, default=90, help="市场监测自然日窗口，默认 90 天")
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 只股票，调试用")

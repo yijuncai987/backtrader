@@ -106,7 +106,7 @@ python daily_a_share_value_dashboard.py ^
   --spot-workers 4 ^
   --request-pause 0.5 ^
   --request-retries 3 ^
-  --failed-item-retries 1 ^
+  --failed-item-retries 0 ^
   --batch-timeout-seconds 7200 ^
   --price-window 120 ^
   --max-below-ma-pct -10 ^
@@ -117,7 +117,7 @@ python daily_a_share_value_dashboard.py ^
 
 `--max-percentile` 当前只影响页面展示的分位计算阈值说明兼容项，不再作为筛选条件。
 
-默认配置已经偏向“慢但稳”：降低并发、每次外部请求前暂停、接口失败后自动重试，并在批量结束后对失败股票额外补跑一轮。批量阶段达到 `--batch-timeout-seconds` 后会跳过剩余个别项，继续生成看板，避免整次任务卡死。仍未补上的股票会写入：
+默认配置已经偏向“慢但稳”：降低并发、每次外部请求前暂停、接口失败后自动重试。批量结束后默认不再额外补跑失败股票，避免少数慢接口拖住整次任务；批量阶段达到 `--batch-timeout-seconds` 后会跳过剩余个别项，继续生成看板。仍未补上的股票会写入：
 
 ```text
 data/a_share/failures/YYYYMMDD.csv

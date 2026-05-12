@@ -48,9 +48,11 @@ jobs:
             --data-dir data/a_share \
             --refresh \
             --price-workers 3 \
+            --valuation-workers 2 \
             --spot-workers 2 \
             --request-pause 0.8 \
             --request-retries 4 \
+            --failed-item-retries 0 \
             --spot-timeout 30 \
             --batch-timeout-seconds 7200 \
             --price-prescreen-margin-pct 0

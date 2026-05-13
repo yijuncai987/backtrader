@@ -1,5 +1,5 @@
 import json
-from datetime import date as real_date
+from datetime import date as real_date, timezone
 
 import pandas as pd
 import pytest
@@ -67,8 +67,19 @@ def test_current_market_data_date_uses_previous_day_before_close():
         dashboard.datetime(2026, 5, 13, 1, 0)
     ) == real_date(2026, 5, 12)
     assert dashboard.current_market_data_date(
+        dashboard.datetime(2026, 5, 12, 17, 5, tzinfo=timezone.utc)
+    ) == real_date(2026, 5, 12)
+    assert dashboard.current_market_data_date(
         dashboard.datetime(2026, 5, 12, 15, 30)
     ) == real_date(2026, 5, 12)
+
+
+def test_generated_time_is_displayed_in_shanghai_time():
+    generated_at = dashboard.format_market_time(
+        dashboard.datetime(2026, 5, 12, 18, 57, 30, tzinfo=timezone.utc)
+    )
+
+    assert generated_at == "2026-05-13 02:57:30"
 
 
 def test_normalize_spot_akshare_fallback_strips_market_prefixes():

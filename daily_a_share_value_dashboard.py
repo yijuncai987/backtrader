@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import pandas as pd
@@ -38,6 +39,7 @@ import requests
 DEFAULT_OUTPUT = "a_share_value_dashboard.html"
 DEFAULT_CACHE_DIR = Path("cache") / "a_share_value_dashboard"
 DEFAULT_DATA_DIR = Path("data") / "a_share"
+MARKET_TZ = ZoneInfo("Asia/Shanghai")
 MIN_USABLE_SPOT_ROWS = 1000
 
 
@@ -71,7 +73,21 @@ class ScreenConfig:
 
 
 def log(message: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    print(f"[{market_now().strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def market_now() -> datetime:
+    return datetime.now(MARKET_TZ)
+
+
+def as_market_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(MARKET_TZ)
+
+
+def format_market_time(value: datetime | None = None) -> str:
+    return as_market_time(value or market_now()).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def ensure_cache_dir(cache_dir: Path) -> None:
@@ -796,7 +812,7 @@ def previous_probable_trading_day(day: date) -> date:
 
 
 def current_market_data_date(now: datetime | None = None) -> date:
-    now = now or datetime.now()
+    now = as_market_time(now or market_now())
     current_day = now.date()
     if is_probable_trading_day(current_day) and (now.hour, now.minute) >= (15, 5):
         return current_day
@@ -1569,7 +1585,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         "valuation_prefilter_count": 0,
         "price_prefilter_count": 0,
         "failure_report_path": "",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": format_market_time(),
         "mode": "真实数据",
     }
     failure_records: list[dict] = []
@@ -1767,7 +1783,7 @@ def demo_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         "valuation_prefilter_count": 2,
         "price_prefilter_count": 2,
         "failure_report_path": "",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": format_market_time(),
         "mode": "演示数据",
     }
     return pd.DataFrame(rows), diagnostics
@@ -2649,7 +2665,7 @@ def build_html(
       <div class="toolbar">
         <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
         <div class="meta">
-          生成时间：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
+          生成时间（上海）：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
           本地候选：{diagnostics.get("price_prescreen_candidate_count", 0)}；前复权达标：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格失败：{diagnostics.get("price_error_count", 0)}；历史不足：{diagnostics.get("history_short_count", 0)}；估值缺失：{diagnostics.get("valuation_incomplete_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}；重试股票：{diagnostics.get("price_retry_count", 0)}
         </div>
       </div>

@@ -1790,44 +1790,16 @@ def demo_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
 
 
 def monitor_date_window(config: ScreenConfig) -> tuple[date, date]:
-    end = date.today()
+    end = current_market_data_date()
     start = end - timedelta(days=max(30, config.monitor_days) - 1)
     return start, end
 
 
-def fetch_market_index_history(symbol: str, label: str, config: ScreenConfig) -> pd.DataFrame:
-    start, end = monitor_date_window(config)
-    cache_path = config.cache_dir / "market_monitor" / f"index_{symbol}_{start:%Y%m%d}_{end:%Y%m%d}.csv"
-    if not config.refresh and is_cache_fresh(cache_path):
-        cached = read_csv_cache(cache_path)
-        if cached is not None and not cached.empty:
-            return cached
-
-    em_symbol = f"sz{symbol}" if symbol.startswith("399") else f"sh{symbol}"
-    def load() -> pd.DataFrame:
-        try:
-            df = ak.stock_zh_index_daily_em(
-                symbol=em_symbol,
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-            )
-        except Exception:
-            df = ak.index_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-            )
-        if df is None or df.empty:
-            raise RuntimeError(f"{label}({symbol}) 指数历史为空")
-        return df
-
-    df = fetch_with_retries(f"{label}({symbol}) 指数历史", config, load)
-
+def normalize_market_index_history(df: pd.DataFrame, label: str, source: str) -> pd.DataFrame:
     date_col = pick_column(df.columns, ["日期", "date"])
     volume_col = pick_column(df.columns, ["成交量", "volume"])
     if date_col is None or volume_col is None:
-        raise RuntimeError(f"{label}({symbol}) 缺少日期或成交量字段：{df.columns.tolist()}")
+        raise RuntimeError(f"{label} {source}缺少日期或成交量字段：{df.columns.tolist()}")
 
     work = pd.DataFrame(
         {
@@ -1838,8 +1810,57 @@ def fetch_market_index_history(symbol: str, label: str, config: ScreenConfig) ->
     work = work[(work["日期"].notna()) & (work[f"{label}成交量"].notna())].copy()
     work = work.sort_values("日期").drop_duplicates(subset=["日期"], keep="last")
     work["日期"] = work["日期"].dt.date.astype(str)
-    write_csv_cache(work, cache_path)
     return work
+
+
+def index_market_prefixed_symbol(symbol: str) -> str:
+    return f"sz{symbol}" if symbol.startswith("399") else f"sh{symbol}"
+
+
+def fetch_market_index_history(symbol: str, label: str, config: ScreenConfig) -> pd.DataFrame:
+    start, end = monitor_date_window(config)
+    cache_path = config.cache_dir / "market_monitor" / f"index_{symbol}_{start:%Y%m%d}_{end:%Y%m%d}.csv"
+    if not config.refresh and is_cache_fresh(cache_path):
+        cached = read_csv_cache(cache_path)
+        if cached is not None and not cached.empty:
+            return cached
+
+    source_errors = []
+    em_symbol = index_market_prefixed_symbol(symbol)
+    sources = [
+        (
+            "东方财富",
+            lambda: ak.stock_zh_index_daily_em(
+                symbol=em_symbol,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            ),
+        ),
+        ("新浪", lambda: ak.stock_zh_index_daily(symbol=em_symbol)),
+    ]
+
+    for source_name, fetcher in sources:
+        try:
+            df = fetch_with_retries(f"{label}({symbol}) {source_name}指数历史", config, fetcher)
+            if df is None or df.empty:
+                raise RuntimeError("指数历史为空")
+            work = normalize_market_index_history(df, label, source_name)
+            work["日期"] = pd.to_datetime(work["日期"], errors="coerce")
+            work = work[
+                (work["日期"].notna())
+                & (work["日期"] >= pd.Timestamp(start))
+                & (work["日期"] <= pd.Timestamp(end))
+            ].copy()
+            if work.empty:
+                raise RuntimeError("指定日期窗口内指数历史为空")
+            work["日期"] = work["日期"].dt.date.astype(str)
+            log(f"{label}成交量来源：{source_name}")
+            write_csv_cache(work, cache_path)
+            return work
+        except Exception as exc:
+            source_errors.append(f"{source_name}: {exc}")
+
+    raise RuntimeError(f"{label}({symbol}) 指数历史失败；" + "；".join(source_errors))
 
 
 def fetch_bj_stock_history_for_volume(symbol: str, config: ScreenConfig) -> pd.DataFrame:
@@ -1933,8 +1954,11 @@ def build_volume_ratio_monitor(config: ScreenConfig) -> pd.DataFrame:
     markets = [
         fetch_market_index_history("000001", "上证指数", config),
         fetch_market_index_history("399106", "深证综指", config),
-        fetch_bj_market_volume_history(config),
     ]
+    try:
+        markets.append(fetch_bj_market_volume_history(config))
+    except Exception as exc:
+        log(f"北交所成交量缺失，沪深300成交占比先按沪深两市估算：{exc}")
 
     merged = hs300[["日期", "沪深300成交量"]].copy()
     for df in markets:
@@ -2016,7 +2040,7 @@ def build_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     start, _ = monitor_date_window(config)
     diagnostics = {
         "market_monitor_error": "",
-        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指 + 北交所个股成交量汇总)；融资余额：上海 + 深圳两市融资余额；融资余额5日涨幅：当天融资余额 / 5个交易日前融资余额 - 1",
+        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指；北交所成交量可用时纳入，不可用时先按沪深两市估算)；融资余额：上海 + 深圳两市融资余额；融资余额5日涨幅：当天融资余额 / 5个交易日前融资余额 - 1",
     }
     pieces = []
     errors = []
@@ -2081,8 +2105,82 @@ def demo_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     }
 
 
+MARKET_MONITOR_COLUMNS = ["日期", "沪深300成交占比", "沪深300成交量", "市场总成交量", "融资余额", "融资余额增长率"]
+
+
+def normalize_market_monitor_output(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty or "日期" not in df.columns:
+        return pd.DataFrame(columns=MARKET_MONITOR_COLUMNS)
+
+    work = df.copy()
+    dates = pd.to_datetime(work["日期"], errors="coerce")
+    work = work[dates.notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=MARKET_MONITOR_COLUMNS)
+    work["日期"] = dates[dates.notna()].dt.date.astype(str)
+    for col in MARKET_MONITOR_COLUMNS[1:]:
+        if col not in work.columns:
+            work[col] = None
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.sort_values("日期").drop_duplicates(subset=["日期"], keep="last")
+    return work[MARKET_MONITOR_COLUMNS]
+
+
+def merge_market_monitor_with_existing(
+    current: pd.DataFrame | None,
+    existing: pd.DataFrame | None,
+    config: ScreenConfig | None = None,
+) -> pd.DataFrame:
+    current_work = normalize_market_monitor_output(current)
+    existing_work = normalize_market_monitor_output(existing)
+    if current_work.empty:
+        merged = existing_work
+    elif existing_work.empty:
+        merged = current_work
+    else:
+        merged = (
+            current_work.set_index("日期")
+            .combine_first(existing_work.set_index("日期"))
+            .reset_index()
+            .sort_values("日期")
+        )
+
+    if config is not None and not merged.empty:
+        start, _ = monitor_date_window(config)
+        dates = pd.to_datetime(merged["日期"], errors="coerce")
+        merged = merged[(dates.notna()) & (dates >= pd.Timestamp(start))].copy()
+    return normalize_market_monitor_output(merged)
+
+
+def market_monitor_output_path(output: Path) -> Path:
+    return output.with_name(f"{output.stem}_market_monitor.csv")
+
+
+def append_market_monitor_error(diagnostics: dict, message: str) -> None:
+    current = str(diagnostics.get("market_monitor_error") or "").strip()
+    diagnostics["market_monitor_error"] = f"{current}；{message}" if current else message
+
+
+def resolve_market_monitor_for_output(
+    market_monitor: pd.DataFrame | None,
+    diagnostics: dict,
+    config: ScreenConfig,
+    output: Path,
+) -> pd.DataFrame:
+    current = normalize_market_monitor_output(market_monitor)
+    existing = read_csv_cache(market_monitor_output_path(output))
+    merged = merge_market_monitor_with_existing(current, existing, config)
+
+    if current.empty and not merged.empty:
+        append_market_monitor_error(diagnostics, "本次市场监测更新失败，已保留上一版市场监测数据")
+    elif diagnostics.get("market_monitor_error") and existing is not None and not existing.empty and not merged.empty:
+        append_market_monitor_error(diagnostics, "缺失指标已保留上一版市场监测数据")
+    diagnostics["market_monitor_count"] = len(merged)
+    return merged
+
+
 def monitor_records_for_html(df: pd.DataFrame) -> str:
-    columns = ["日期", "沪深300成交占比", "沪深300成交量", "市场总成交量", "融资余额", "融资余额增长率"]
+    columns = MARKET_MONITOR_COLUMNS
     if df is None or df.empty:
         return "[]"
 
@@ -2618,11 +2716,16 @@ def build_html(
       if (monitorRendered) return;
       renderLineChart('volume-ratio-chart', '沪深300成交占比', '%', '#0f766e');
       renderLineChart('margin-change-chart', '融资余额增长率', '%', '#2563eb', '融资余额5日涨幅');
-      const latest = [...marketMonitorData].reverse().find(row => row['沪深300成交占比'] !== null || row['融资余额增长率'] !== null);
-      if (latest) {
-        const latestNode = document.getElementById('monitor-latest');
-        if (latestNode) {
-          latestNode.textContent = `最新 ${latest['日期']}：成交占比 ${formatNumber(latest['沪深300成交占比'], 2, '%')}，融资余额5日涨幅 ${formatNumber(latest['融资余额增长率'], 2, '%')}`;
+      const latestNode = document.getElementById('monitor-latest');
+      if (latestNode) {
+        const latestVolume = [...marketMonitorData].reverse().find(row => row['沪深300成交占比'] !== null);
+        const latestMargin = [...marketMonitorData].reverse().find(row => row['融资余额增长率'] !== null);
+        if (latestVolume || latestMargin) {
+          const volumeText = latestVolume ? `${latestVolume['日期']} 成交占比 ${formatNumber(latestVolume['沪深300成交占比'], 2, '%')}` : '成交占比暂无数据';
+          const marginText = latestMargin ? `${latestMargin['日期']} 融资余额5日涨幅 ${formatNumber(latestMargin['融资余额增长率'], 2, '%')}` : '融资余额5日涨幅暂无数据';
+          latestNode.textContent = `${volumeText}；${marginText}`;
+        } else {
+          latestNode.textContent = '暂无市场监测数据';
         }
       }
       monitorRendered = true;
@@ -2702,7 +2805,7 @@ def build_html(
       <div class="monitor-head">
         <div>
           <h2>最近90天市场监测</h2>
-          <p>沪深300成交占比 = 沪深300成交量 / 沪深北三个市场成交量合计；融资余额5日涨幅 = 当天融资余额 / 5个交易日前融资余额 - 1。</p>
+          <p>沪深300成交占比 = 沪深300成交量 / 沪深两市成交量合计；北交所成交量可用时纳入；融资余额5日涨幅 = 当天融资余额 / 5个交易日前融资余额 - 1。</p>
         </div>
         <div class="meta">
           样本交易日：{monitor_count}<br>
@@ -2768,6 +2871,7 @@ def write_dashboard(
         log(f"新结果为空或样本过少，保留上一版看板：{output}")
         return output
 
+    market_monitor = resolve_market_monitor_for_output(market_monitor, diagnostics, config, output)
     html_text = build_html(df, diagnostics, config, market_monitor)
     output.write_text(html_text, encoding="utf-8")
     export_cols = [
@@ -2794,7 +2898,7 @@ def write_dashboard(
     export[export_cols].to_csv(csv_output, index=False, encoding="utf-8-sig")
     if market_monitor is not None and not market_monitor.empty:
         market_monitor.to_csv(
-            output.with_name(f"{output.stem}_market_monitor.csv"),
+            market_monitor_output_path(output),
             index=False,
             encoding="utf-8-sig",
         )

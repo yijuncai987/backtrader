@@ -50,6 +50,92 @@ def test_monitor_records_for_html_serializes_chart_metrics():
     assert any(record["融资余额增长率"] is not None for record in records)
 
 
+def test_market_index_history_falls_back_to_sina(monkeypatch, tmp_path):
+    def empty_em(**kwargs):
+        return pd.DataFrame()
+
+    def fake_sina(symbol):
+        assert symbol == "sh000300"
+        return pd.DataFrame(
+            {
+                "date": ["2026-05-11", "2026-05-12", "2026-05-13"],
+                "volume": [100.0, 110.0, 120.0],
+            }
+        )
+
+    monkeypatch.setattr(dashboard.ak, "stock_zh_index_daily_em", empty_em)
+    monkeypatch.setattr(dashboard.ak, "stock_zh_index_daily", fake_sina)
+    monkeypatch.setattr(dashboard, "current_market_data_date", lambda: real_date(2026, 5, 13))
+    config = ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data", request_pause=0, request_retries=0)
+    ensure_cache_dir(config.cache_dir)
+
+    result = dashboard.fetch_market_index_history("000300", "沪深300", config)
+
+    assert result["日期"].tolist() == ["2026-05-11", "2026-05-12", "2026-05-13"]
+    assert result["沪深300成交量"].tolist() == [100.0, 110.0, 120.0]
+
+
+def test_volume_ratio_continues_when_bj_volume_fails(monkeypatch, tmp_path):
+    pieces = {
+        "000300": pd.DataFrame({"日期": ["2026-05-12"], "沪深300成交量": [10.0]}),
+        "000001": pd.DataFrame({"日期": ["2026-05-12"], "上证指数成交量": [30.0]}),
+        "399106": pd.DataFrame({"日期": ["2026-05-12"], "深证综指成交量": [20.0]}),
+    }
+
+    def fake_index(symbol, label, config):
+        return pieces[symbol]
+
+    monkeypatch.setattr(dashboard, "fetch_market_index_history", fake_index)
+    monkeypatch.setattr(dashboard, "fetch_bj_market_volume_history", lambda config: (_ for _ in ()).throw(RuntimeError("断开")))
+
+    result = dashboard.build_volume_ratio_monitor(ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data"))
+
+    assert result["沪深300成交占比"].iloc[0] == pytest.approx(20.0)
+
+
+def test_market_monitor_merge_preserves_existing_missing_metrics(monkeypatch):
+    monkeypatch.setattr(dashboard, "current_market_data_date", lambda: real_date(2026, 5, 13))
+    existing = pd.DataFrame(
+        {
+            "日期": ["2026-05-12"],
+            "沪深300成交占比": [17.0],
+            "沪深300成交量": [100.0],
+            "市场总成交量": [588.0],
+            "融资余额": [2800.0],
+            "融资余额增长率": [3.0],
+        }
+    )
+    current = pd.DataFrame(
+        {
+            "日期": ["2026-05-12", "2026-05-13"],
+            "融资余额": [2820.0, None],
+            "融资余额增长率": [4.0, None],
+        }
+    )
+
+    merged = dashboard.merge_market_monitor_with_existing(current, existing, ScreenConfig())
+
+    may_12 = merged[merged["日期"] == "2026-05-12"].iloc[0]
+    assert may_12["沪深300成交占比"] == pytest.approx(17.0)
+    assert may_12["融资余额增长率"] == pytest.approx(4.0)
+
+
+def test_market_monitor_merge_uses_existing_when_current_empty(monkeypatch):
+    monkeypatch.setattr(dashboard, "current_market_data_date", lambda: real_date(2026, 5, 13))
+    existing = pd.DataFrame(
+        {
+            "日期": ["2026-05-12"],
+            "沪深300成交占比": [17.0],
+            "融资余额增长率": [3.0],
+        }
+    )
+
+    merged = dashboard.merge_market_monitor_with_existing(pd.DataFrame(), existing, ScreenConfig())
+
+    assert merged["日期"].tolist() == ["2026-05-12"]
+    assert merged["沪深300成交占比"].iloc[0] == pytest.approx(17.0)
+
+
 def test_default_live_fetching_prefers_stability():
     config = ScreenConfig()
 

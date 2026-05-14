@@ -2242,6 +2242,9 @@ SCREENING_CHANGE_DISPLAY_COLUMNS = [
     "现价",
     "半年线乖离率",
     "股息率",
+    "当前半年线乖离率",
+    "当前股息率",
+    "剔除原因",
 ]
 
 
@@ -2303,6 +2306,129 @@ def sort_screening_changes(df: pd.DataFrame) -> pd.DataFrame:
     return work.drop(columns=["_变化排序", "_股息排序"])
 
 
+def spot_snapshot_for_date(config: ScreenConfig, snapshot_date: date) -> pd.DataFrame:
+    path = config.data_dir / "spot" / f"{snapshot_date:%Y%m%d}.csv"
+    snapshot = read_csv(path)
+    return snapshot if snapshot is not None else pd.DataFrame()
+
+
+def latest_price_from_row(row: pd.Series) -> float | None:
+    for col in ["最新价", "现价", "收盘", "close"]:
+        value = to_float(row.get(col))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def cached_price_deviation(symbol: str, latest_price: float, config: ScreenConfig, snapshot_date: date) -> float:
+    history = read_csv(price_history_data_path(symbol, config))
+    if history is None or history.empty:
+        raise RuntimeError("前复权历史缺失")
+    history = append_latest_price_to_history(history, latest_price, snapshot_date)
+    close_col = pick_column(history.columns, ["收盘", "close"])
+    if close_col is None:
+        raise RuntimeError("前复权收盘价字段缺失")
+    work = history.copy()
+    work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
+    work = work[work[close_col].notna()].copy()
+    if len(work) < config.price_window:
+        raise RuntimeError(f"前复权历史不足 {config.price_window}")
+    ma = float(work[close_col].tail(config.price_window).mean())
+    if ma <= 0:
+        raise RuntimeError("半年线无效")
+    return (latest_price / ma - 1) * 100
+
+
+def cached_dividend_yield_ttm(
+    symbol: str,
+    latest_price: float,
+    config: ScreenConfig,
+    snapshot_date: date,
+) -> float:
+    history = read_csv(config.data_dir / "dividends" / f"{symbol}.csv")
+    if history is None or history.empty or "派息比例" not in history.columns:
+        raise RuntimeError("股息历史缺失")
+    date_col = pick_column(history.columns, ["除权日", "派息日", "股权登记日", "实施方案公告日期"])
+    if date_col is None:
+        raise RuntimeError("股息日期字段缺失")
+
+    work = history.copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work["派息比例"] = pd.to_numeric(work["派息比例"], errors="coerce")
+    cutoff = pd.Timestamp(snapshot_date - timedelta(days=config.dividend_lookback_days))
+    end = pd.Timestamp(snapshot_date)
+    recent = work[
+        (work[date_col].notna())
+        & (work[date_col] >= cutoff)
+        & (work[date_col] <= end)
+        & (work["派息比例"].notna())
+        & (work["派息比例"] > 0)
+    ].copy()
+    if recent.empty:
+        raise RuntimeError("最近股息为空")
+    dividend_per_share = float(recent["派息比例"].sum()) / 10
+    return dividend_per_share / latest_price * 100
+
+
+def current_screening_status_for_removed(
+    symbol: str,
+    config: ScreenConfig,
+    snapshot_date: date,
+    spot_rows: dict[str, pd.Series],
+) -> dict:
+    symbol = normalize_symbol(symbol)
+    spot_row = spot_rows.get(symbol)
+    if spot_row is None:
+        return {"当前半年线乖离率": None, "当前股息率": None, "剔除原因": "当前行情缺失"}
+
+    latest_price = latest_price_from_row(spot_row)
+    if latest_price is None:
+        return {"当前半年线乖离率": None, "当前股息率": None, "剔除原因": "当前价格缺失"}
+
+    reasons = []
+    price_deviation = None
+    dividend_yield = None
+    try:
+        price_deviation = cached_price_deviation(symbol, latest_price, config, snapshot_date)
+        if price_deviation > config.max_below_ma_pct:
+            reasons.append(f"半年线乖离率 {fmt_num(price_deviation, 2, '%')}，未低于 {fmt_num(config.max_below_ma_pct, 2, '%')}")
+    except Exception as exc:
+        reasons.append(f"价格指标无法复算：{exc}")
+
+    try:
+        dividend_yield = cached_dividend_yield_ttm(symbol, latest_price, config, snapshot_date)
+        if dividend_yield <= config.min_dividend_yield_pct:
+            reasons.append(f"股息率 {fmt_num(dividend_yield, 2, '%')}，未高于 {fmt_num(config.min_dividend_yield_pct, 2, '%')}")
+    except Exception as exc:
+        reasons.append(f"股息指标无法复算：{exc}")
+
+    if not reasons:
+        reasons.append("当前本地复算仍满足，可能是当日生成时接口缺失或字段未补全")
+    return {
+        "当前半年线乖离率": price_deviation,
+        "当前股息率": dividend_yield,
+        "剔除原因": "；".join(reasons),
+    }
+
+
+def annotate_removed_screening_changes(
+    removed: pd.DataFrame,
+    config: ScreenConfig,
+    snapshot_date: date,
+) -> pd.DataFrame:
+    if removed.empty:
+        return ensure_screening_change_columns(removed)
+
+    spot = spot_snapshot_for_date(config, snapshot_date)
+    spot_rows = screening_snapshot_rows(spot)
+    work = removed.copy()
+    for idx, row in work.iterrows():
+        status = current_screening_status_for_removed(row.get("代码"), config, snapshot_date, spot_rows)
+        for key, value in status.items():
+            work.at[idx, key] = value
+    return sort_screening_changes(work)
+
+
 def build_screening_changes(
     current_df: pd.DataFrame,
     config: ScreenConfig,
@@ -2362,7 +2488,11 @@ def build_screening_changes(
         "lookback_days": lookback_days,
         "snapshot_dates": [snapshot_date.isoformat() for snapshot_date, _ in timeline[1:]],
         "new": sort_screening_changes(pd.DataFrame(new_records)),
-        "removed": sort_screening_changes(pd.DataFrame(removed_records)),
+        "removed": annotate_removed_screening_changes(
+            sort_screening_changes(pd.DataFrame(removed_records)),
+            config,
+            timeline[-1][0],
+        ),
     }
 
 
@@ -2382,7 +2512,14 @@ def render_change_table_rows(df: pd.DataFrame, include_last_seen: bool = False) 
             f"<td class='num'>{fmt_num(row.get('现价'))}</td>"
             f"<td class='num danger'>{fmt_num(row.get('半年线乖离率'), 2, '%')}</td>"
             f"<td class='num'>{fmt_num(row.get('股息率'), 2, '%')}</td>"
-            "</tr>"
+            + (
+                f"<td class='num danger'>{fmt_num(row.get('当前半年线乖离率'), 2, '%')}</td>"
+                f"<td class='num'>{fmt_num(row.get('当前股息率'), 2, '%')}</td>"
+                f"<td>{html.escape(str(row.get('剔除原因') or ''))}</td>"
+                if include_last_seen
+                else ""
+            )
+            + "</tr>"
         )
     return "\n".join(rows)
 
@@ -2407,6 +2544,7 @@ def render_screening_change_panel(title: str, df: pd.DataFrame, empty_text: str,
                 <th class="num">股价</th>
                 <th class="num">半年线乖离</th>
                 <th class="num">股息率</th>
+                {'<th class="num">当前乖离</th><th class="num">当前股息率</th><th>剔除原因</th>' if include_last_seen else ''}
               </tr>
             </thead>
             <tbody>{render_change_table_rows(df, include_last_seen=include_last_seen)}</tbody>
@@ -2716,7 +2854,7 @@ def build_html(
       scrollbar-gutter: stable;
     }
     .change-table {
-      min-width: 740px;
+      min-width: 1040px;
       font-size: 12px;
     }
     .change-table th,

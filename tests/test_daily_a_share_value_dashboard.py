@@ -184,6 +184,47 @@ def test_screening_changes_use_current_membership_without_duplicates(tmp_path):
     assert new_codes.isdisjoint(removed_codes)
 
 
+def test_removed_screening_changes_include_current_reason(tmp_path):
+    config = ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data", price_window=3)
+    ensure_data_dir(config.data_dir)
+    pd.DataFrame(
+        {
+            "代码": ["000001"],
+            "名称": ["一号"],
+            "所属行业": ["测试行业"],
+            "现价": [9.0],
+            "半年线乖离率": [-12.0],
+            "股息率": [4.0],
+        }
+    ).to_csv(config.data_dir / "screening_results" / "20260511.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(
+        {
+            "代码": ["000001"],
+            "名称": ["一号"],
+            "最新价": [11.0],
+        }
+    ).to_csv(config.data_dir / "spot" / "20260512.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(
+        {
+            "date": ["2026-05-08", "2026-05-11"],
+            "close": [10.0, 10.0],
+        }
+    ).to_csv(config.data_dir / "price_history_qfq" / "000001.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(
+        {
+            "除权日": ["2026-05-01"],
+            "派息比例": [5.0],
+        }
+    ).to_csv(config.data_dir / "dividends" / "000001.csv", index=False, encoding="utf-8-sig")
+
+    changes = dashboard.build_screening_changes(pd.DataFrame(), config, current_date=real_date(2026, 5, 12))
+    removed = changes["removed"].iloc[0]
+
+    assert removed["当前半年线乖离率"] > config.max_below_ma_pct
+    assert removed["当前股息率"] > config.min_dividend_yield_pct
+    assert "半年线乖离率" in removed["剔除原因"]
+
+
 def test_default_live_fetching_prefers_stability():
     config = ScreenConfig()
 

@@ -611,3 +611,17 @@ def test_build_html_contains_market_monitor_charts():
     assert "margin-change-chart" in html
     assert "沪深300成交占比" in html
     assert "融资余额增长率" in html
+
+
+def test_build_html_labels_final_screening_table():
+    config = ScreenConfig()
+    stocks, diagnostics = demo_screen(config)
+    monitor, monitor_diagnostics = demo_market_monitor(config)
+    diagnostics.update(monitor_diagnostics)
+
+    html = build_html(stocks, diagnostics, config, monitor)
+
+    assert "最终入选榜单" in html
+    assert "榜单日期" in html
+    assert "入选数量" in html
+    assert str(len(stocks)) in html

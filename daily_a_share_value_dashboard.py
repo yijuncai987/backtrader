@@ -2217,6 +2217,22 @@ def fmt_market_cap(value) -> str:
     return f"{value / 100000000:,.0f} 亿"
 
 
+def latest_date_text(df: pd.DataFrame, columns: list[str]) -> str:
+    if df is None or df.empty:
+        return ""
+    latest = None
+    for col in columns:
+        if col not in df.columns:
+            continue
+        values = pd.to_datetime(df[col], errors="coerce")
+        if values.notna().any():
+            value = values.max()
+            latest = value if latest is None or value > latest else latest
+    if latest is None or pd.isna(latest):
+        return ""
+    return latest.date().isoformat()
+
+
 SCREENING_CHANGE_DISPLAY_COLUMNS = [
     "变化日期",
     "最后在榜",
@@ -2478,6 +2494,7 @@ def build_html(
     avg_dividend = df["股息率"].mean() if "股息率" in df.columns and not df.empty else None
     avg_deviation = df["半年线乖离率"].mean() if "半年线乖离率" in df.columns and not df.empty else None
     industries = df["所属行业"].nunique() if "所属行业" in df.columns and not df.empty else 0
+    list_date = latest_date_text(df, ["价格数据日期", "估值数据日期"])
 
     sorted_df = df.copy()
     if not sorted_df.empty and "股息率" in sorted_df.columns:
@@ -2718,6 +2735,38 @@ def build_html(
       font-size: 13px;
       line-height: 1.6;
     }
+    .final-list-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin: 18px 0 10px;
+      flex-wrap: wrap;
+    }
+    .final-list-head h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .final-list-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .final-list-meta {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+      flex-wrap: wrap;
+    }
+    .final-list-meta strong {
+      color: var(--ink);
+      font-weight: 750;
+    }
     .table-wrap {
       background: white;
       border: 1px solid var(--line);
@@ -2878,6 +2927,8 @@ def build_html(
       .card .value { font-size: 21px; }
       .chart-grid { grid-template-columns: 1fr; }
       .change-grid { grid-template-columns: 1fr; }
+      .final-list-head { align-items: flex-start; }
+      .final-list-meta { justify-content: flex-start; }
       .tabs { overflow-x: auto; }
     }
     """
@@ -3091,6 +3142,19 @@ def build_html(
       {warning}
       {empty_note}
       {screening_changes_html}
+      <section class="final-list-head" aria-label="最终入选榜单信息">
+        <div>
+          <h2>最终入选榜单</h2>
+          <p>当前仍满足低估高息筛选条件的股票，默认按股息率从高到低排列。</p>
+        </div>
+        <div class="final-list-meta">
+          <span>榜单日期：<strong>{html.escape(list_date or "-")}</strong></span>
+          <span>入选数量：<strong>{final_count}</strong></span>
+          <span>覆盖行业：<strong>{industries}</strong></span>
+          <span>平均股息率：<strong>{fmt_num(avg_dividend, 2, "%")}</strong></span>
+          <span>平均半年线乖离：<strong>{fmt_num(avg_deviation, 2, "%")}</strong></span>
+        </div>
+      </section>
       <div class="table-wrap">
         <table id="stock-table">
           <thead>

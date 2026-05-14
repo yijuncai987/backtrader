@@ -202,6 +202,38 @@
       font-size: 13px;
       line-height: 1.6;
     }
+    .final-list-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin: 18px 0 10px;
+      flex-wrap: wrap;
+    }
+    .final-list-head h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .final-list-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .final-list-meta {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+      flex-wrap: wrap;
+    }
+    .final-list-meta strong {
+      color: var(--ink);
+      font-weight: 750;
+    }
     .table-wrap {
       background: white;
       border: 1px solid var(--line);
@@ -362,6 +394,8 @@
       .card .value { font-size: 21px; }
       .chart-grid { grid-template-columns: 1fr; }
       .change-grid { grid-template-columns: 1fr; }
+      .final-list-head { align-items: flex-start; }
+      .final-list-meta { justify-content: flex-start; }
       .tabs { overflow-x: auto; }
     }
     </style>
@@ -513,6 +547,19 @@
         </div>
       </section>
 
+      <section class="final-list-head" aria-label="最终入选榜单信息">
+        <div>
+          <h2>最终入选榜单</h2>
+          <p>当前仍满足低估高息筛选条件的股票，默认按股息率从高到低排列。</p>
+        </div>
+        <div class="final-list-meta">
+          <span>榜单日期：<strong>2026-05-13</strong></span>
+          <span>入选数量：<strong>85</strong></span>
+          <span>覆盖行业：<strong>68</strong></span>
+          <span>平均股息率：<strong>4.96%</strong></span>
+          <span>平均半年线乖离：<strong>-14.57%</strong></span>
+        </div>
+      </section>
       <div class="table-wrap">
         <table id="stock-table">
           <thead>

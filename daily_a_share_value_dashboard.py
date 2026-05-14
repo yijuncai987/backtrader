@@ -2217,6 +2217,232 @@ def fmt_market_cap(value) -> str:
     return f"{value / 100000000:,.0f} 亿"
 
 
+SCREENING_CHANGE_DISPLAY_COLUMNS = [
+    "变化日期",
+    "最后在榜",
+    "代码",
+    "名称",
+    "所属行业",
+    "现价",
+    "半年线乖离率",
+    "股息率",
+]
+
+
+def screening_result_date(path: Path) -> date | None:
+    try:
+        return datetime.strptime(path.stem, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def screening_snapshot_rows(df: pd.DataFrame | None) -> dict[str, pd.Series]:
+    if df is None or df.empty or "代码" not in df.columns:
+        return {}
+    work = normalize_code_columns(df.copy())
+    work = work[work["代码"].map(has_text)].copy()
+    if work.empty:
+        return {}
+    work = work.drop_duplicates(subset=["代码"], keep="last")
+    return {str(row["代码"]): row for _, row in work.iterrows()}
+
+
+def load_screening_snapshots(
+    config: ScreenConfig,
+    current_df: pd.DataFrame,
+    current_date: date | None = None,
+) -> list[tuple[date, pd.DataFrame]]:
+    result_dir = config.data_dir / "screening_results"
+    snapshots: dict[date, pd.DataFrame] = {}
+    if result_dir.exists():
+        for path in sorted(result_dir.glob("*.csv")):
+            snapshot_date = screening_result_date(path)
+            if snapshot_date is None:
+                continue
+            snapshot = read_csv(path)
+            if snapshot is not None:
+                snapshots[snapshot_date] = snapshot
+
+    effective_date = current_date or datetime.strptime(today_stamp(), "%Y%m%d").date()
+    snapshots[effective_date] = current_df.copy()
+    return sorted(snapshots.items(), key=lambda item: item[0])
+
+
+def ensure_screening_change_columns(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    for col in SCREENING_CHANGE_DISPLAY_COLUMNS:
+        if col not in work.columns:
+            work[col] = None
+    return work[SCREENING_CHANGE_DISPLAY_COLUMNS]
+
+
+def sort_screening_changes(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return ensure_screening_change_columns(df)
+    work = ensure_screening_change_columns(df)
+    work["_变化排序"] = pd.to_datetime(work["变化日期"], errors="coerce")
+    work["_股息排序"] = pd.to_numeric(work["股息率"], errors="coerce")
+    work["_股息排序"] = work["_股息排序"].fillna(float("-inf"))
+    work = work.sort_values(["_变化排序", "_股息排序", "代码"], ascending=[False, False, True])
+    return work.drop(columns=["_变化排序", "_股息排序"])
+
+
+def build_screening_changes(
+    current_df: pd.DataFrame,
+    config: ScreenConfig,
+    lookback_days: int = 5,
+    current_date: date | None = None,
+) -> dict:
+    snapshots = load_screening_snapshots(config, current_df, current_date=current_date)
+    if len(snapshots) < 2:
+        return {
+            "lookback_days": lookback_days,
+            "snapshot_dates": [snapshots[0][0].isoformat()] if snapshots else [],
+            "new": pd.DataFrame(columns=SCREENING_CHANGE_DISPLAY_COLUMNS),
+            "removed": pd.DataFrame(columns=SCREENING_CHANGE_DISPLAY_COLUMNS),
+        }
+
+    timeline = snapshots[-(lookback_days + 1):]
+    current_rows = screening_snapshot_rows(timeline[-1][1])
+    current_codes = set(current_rows)
+    added_dates: dict[str, date] = {}
+    removed_dates: dict[str, date] = {}
+    removed_last_seen_dates: dict[str, date] = {}
+    removed_rows: dict[str, pd.Series] = {}
+
+    for (previous_date, previous_df), (snapshot_date, snapshot_df) in zip(timeline, timeline[1:]):
+        previous_rows = screening_snapshot_rows(previous_df)
+        snapshot_rows = screening_snapshot_rows(snapshot_df)
+        previous_codes = set(previous_rows)
+        snapshot_codes = set(snapshot_rows)
+
+        for code in snapshot_codes - previous_codes:
+            added_dates[code] = snapshot_date
+        for code in previous_codes - snapshot_codes:
+            removed_dates[code] = snapshot_date
+            removed_last_seen_dates[code] = previous_date
+            if code in previous_rows:
+                removed_rows[code] = previous_rows[code]
+
+    new_records = []
+    for code, change_date in added_dates.items():
+        if code not in current_codes:
+            continue
+        record = current_rows[code].to_dict()
+        record["变化日期"] = change_date.isoformat()
+        record["最后在榜"] = ""
+        new_records.append(record)
+
+    removed_records = []
+    for code, change_date in removed_dates.items():
+        if code in current_codes or code not in removed_rows:
+            continue
+        record = removed_rows[code].to_dict()
+        record["变化日期"] = change_date.isoformat()
+        record["最后在榜"] = removed_last_seen_dates.get(code, change_date).isoformat()
+        removed_records.append(record)
+
+    return {
+        "lookback_days": lookback_days,
+        "snapshot_dates": [snapshot_date.isoformat() for snapshot_date, _ in timeline[1:]],
+        "new": sort_screening_changes(pd.DataFrame(new_records)),
+        "removed": sort_screening_changes(pd.DataFrame(removed_records)),
+    }
+
+
+def render_change_table_rows(df: pd.DataFrame, include_last_seen: bool = False) -> str:
+    rows = []
+    for _, row in df.iterrows():
+        last_seen_cell = ""
+        if include_last_seen:
+            last_seen_cell = f"<td>{html.escape(str(row.get('最后在榜') or ''))}</td>"
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(row.get('变化日期') or ''))}</td>"
+            f"{last_seen_cell}"
+            f"<td><strong>{html.escape(str(row.get('代码', '')))}</strong></td>"
+            f"<td>{html.escape(str(row.get('名称', '')))}</td>"
+            f"<td>{html.escape(str(row.get('所属行业', '未知')))}</td>"
+            f"<td class='num'>{fmt_num(row.get('现价'))}</td>"
+            f"<td class='num danger'>{fmt_num(row.get('半年线乖离率'), 2, '%')}</td>"
+            f"<td class='num'>{fmt_num(row.get('股息率'), 2, '%')}</td>"
+            "</tr>"
+        )
+    return "\n".join(rows)
+
+
+def render_screening_change_panel(title: str, df: pd.DataFrame, empty_text: str, include_last_seen: bool = False) -> str:
+    count = len(df)
+    tone_class = "removed" if include_last_seen else "new"
+    if df.empty:
+        body = f"<div class='change-empty'>{html.escape(empty_text)}</div>"
+    else:
+        last_seen_header = "<th>最后在榜</th>" if include_last_seen else ""
+        body = f"""
+        <div class="change-table-wrap">
+          <table class="change-table">
+            <thead>
+              <tr>
+                <th>{'剔除日' if include_last_seen else '入选日'}</th>
+                {last_seen_header}
+                <th>代码</th>
+                <th>名称</th>
+                <th>行业</th>
+                <th class="num">股价</th>
+                <th class="num">半年线乖离</th>
+                <th class="num">股息率</th>
+              </tr>
+            </thead>
+            <tbody>{render_change_table_rows(df, include_last_seen=include_last_seen)}</tbody>
+          </table>
+        </div>
+        """
+    return f"""
+      <section class="change-panel {tone_class}">
+        <div class="change-panel-head">
+          <h3>{html.escape(title)}</h3>
+          <span>{count}</span>
+        </div>
+        {body}
+      </section>
+    """
+
+
+def render_screening_changes(changes: dict | None) -> str:
+    if not changes:
+        changes = {
+            "lookback_days": 5,
+            "snapshot_dates": [],
+            "new": pd.DataFrame(columns=SCREENING_CHANGE_DISPLAY_COLUMNS),
+            "removed": pd.DataFrame(columns=SCREENING_CHANGE_DISPLAY_COLUMNS),
+        }
+    lookback_days = int(changes.get("lookback_days") or 5)
+    snapshot_dates = changes.get("snapshot_dates") or []
+    new_value = changes.get("new")
+    removed_value = changes.get("removed")
+    new_df = ensure_screening_change_columns(new_value if isinstance(new_value, pd.DataFrame) else pd.DataFrame())
+    removed_df = ensure_screening_change_columns(removed_value if isinstance(removed_value, pd.DataFrame) else pd.DataFrame())
+    if snapshot_dates:
+        date_hint = f"统计窗口：{html.escape(snapshot_dates[0])} 至 {html.escape(snapshot_dates[-1])}"
+    else:
+        date_hint = "暂无足够历史榜单"
+    return f"""
+      <section class="change-section" aria-label="最近{lookback_days}个交易日榜单变化">
+        <div class="change-head">
+          <div>
+            <h2>最近{lookback_days}个交易日榜单变化</h2>
+            <p>按每日最终榜单比较；今日仍在榜单的列为新符合，今日已不在榜单的列为新剔除。</p>
+          </div>
+          <div class="meta">{date_hint}</div>
+        </div>
+        <div class="change-grid">
+          {render_screening_change_panel("新符合筛选条件", new_df, "最近窗口内暂无新入选。")}
+          {render_screening_change_panel("新剔除出榜", removed_df, "最近窗口内暂无新剔除。", include_last_seen=True)}
+        </div>
+      </section>
+    """
+
+
 def render_table_rows(df: pd.DataFrame) -> str:
     rows = []
     for _, row in df.iterrows():
@@ -2246,6 +2472,7 @@ def build_html(
     diagnostics: dict,
     config: ScreenConfig,
     market_monitor: pd.DataFrame | None = None,
+    screening_changes: dict | None = None,
 ) -> str:
     final_count = len(df)
     avg_dividend = df["股息率"].mean() if "股息率" in df.columns and not df.empty else None
@@ -2285,6 +2512,7 @@ def build_html(
         )
 
     rows = render_table_rows(sorted_df)
+    screening_changes_html = render_screening_changes(screening_changes)
     monitor_json = monitor_records_for_html(market_monitor if market_monitor is not None else pd.DataFrame())
     monitor_error = html.escape(str(diagnostics.get("market_monitor_error", "")))
     monitor_source = html.escape(str(diagnostics.get("market_monitor_source", "")))
@@ -2403,6 +2631,93 @@ def build_html(
     }
     .warning { background: #fff4e5; color: #8a4b00; border: 1px solid #ffd8a8; }
     .empty { background: #eef4ff; color: #1e3a8a; border: 1px solid #c7d7fe; }
+    .change-section {
+      margin: 14px 0 18px;
+    }
+    .change-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .change-head h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .change-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .change-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .change-panel {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 22px rgba(20, 30, 50, .05);
+    }
+    .change-panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid #edf0f5;
+      background: #f8fafc;
+    }
+    .change-panel-head h3 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.25;
+    }
+    .change-panel-head span {
+      min-width: 30px;
+      height: 24px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 750;
+      color: white;
+      background: var(--accent);
+    }
+    .change-panel.removed .change-panel-head span { background: var(--danger); }
+    .change-table-wrap {
+      max-height: 248px;
+      overflow: auto;
+      scrollbar-gutter: stable;
+    }
+    .change-table {
+      min-width: 740px;
+      font-size: 12px;
+    }
+    .change-table th,
+    .change-table td {
+      padding: 9px 8px;
+    }
+    .change-table th {
+      position: static;
+      cursor: default;
+      box-shadow: none;
+    }
+    .change-table th::after { content: ""; margin: 0; }
+    .change-empty {
+      padding: 18px 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
     .table-wrap {
       background: white;
       border: 1px solid var(--line);
@@ -2562,6 +2877,7 @@ def build_html(
       .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: -58px; }
       .card .value { font-size: 21px; }
       .chart-grid { grid-template-columns: 1fr; }
+      .change-grid { grid-template-columns: 1fr; }
       .tabs { overflow-x: auto; }
     }
     """
@@ -2774,6 +3090,7 @@ def build_html(
       </div>
       {warning}
       {empty_note}
+      {screening_changes_html}
       <div class="table-wrap">
         <table id="stock-table">
           <thead>
@@ -2872,7 +3189,11 @@ def write_dashboard(
         return output
 
     market_monitor = resolve_market_monitor_for_output(market_monitor, diagnostics, config, output)
-    html_text = build_html(df, diagnostics, config, market_monitor)
+    if diagnostics.get("mode") == "演示数据" or config.limit:
+        screening_changes = None
+    else:
+        screening_changes = build_screening_changes(df, config)
+    html_text = build_html(df, diagnostics, config, market_monitor, screening_changes)
     output.write_text(html_text, encoding="utf-8")
     export_cols = [
         "代码",

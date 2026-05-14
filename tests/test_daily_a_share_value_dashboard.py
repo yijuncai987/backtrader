@@ -136,6 +136,54 @@ def test_market_monitor_merge_uses_existing_when_current_empty(monkeypatch):
     assert merged["沪深300成交占比"].iloc[0] == pytest.approx(17.0)
 
 
+def test_screening_changes_use_current_membership_without_duplicates(tmp_path):
+    config = ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data")
+    ensure_data_dir(config.data_dir)
+
+    snapshots = {
+        "20260507": ["000001", "000002", "000003"],
+        "20260508": ["000002", "000003", "000004"],
+        "20260511": ["000003", "000004", "000005"],
+    }
+    names = {
+        "000001": "一号",
+        "000002": "二号",
+        "000003": "三号",
+        "000004": "四号",
+        "000005": "五号",
+    }
+    for stamp, codes in snapshots.items():
+        pd.DataFrame(
+            {
+                "代码": codes,
+                "名称": [names[code] for code in codes],
+                "所属行业": ["测试行业"] * len(codes),
+                "现价": [10.0] * len(codes),
+                "半年线乖离率": [-12.0] * len(codes),
+                "股息率": [4.0] * len(codes),
+            }
+        ).to_csv(config.data_dir / "screening_results" / f"{stamp}.csv", index=False, encoding="utf-8-sig")
+
+    current = pd.DataFrame(
+        {
+            "代码": ["000002", "000004", "000005"],
+            "名称": ["二号", "四号", "五号"],
+            "所属行业": ["测试行业", "测试行业", "测试行业"],
+            "现价": [11.0, 12.0, 13.0],
+            "半年线乖离率": [-13.0, -14.0, -15.0],
+            "股息率": [4.1, 4.2, 4.3],
+        }
+    )
+
+    changes = dashboard.build_screening_changes(current, config, current_date=real_date(2026, 5, 12))
+    new_codes = set(changes["new"]["代码"])
+    removed_codes = set(changes["removed"]["代码"])
+
+    assert new_codes == {"000002", "000004", "000005"}
+    assert removed_codes == {"000001", "000003"}
+    assert new_codes.isdisjoint(removed_codes)
+
+
 def test_default_live_fetching_prefers_stability():
     config = ScreenConfig()
 

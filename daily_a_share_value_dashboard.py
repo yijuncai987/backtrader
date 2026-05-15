@@ -1556,11 +1556,98 @@ def has_severe_price_fetch_failure(diagnostics: dict) -> bool:
     return price_error_count >= max(100, int(candidate_count * 0.5))
 
 
+def latest_previous_screening_result(config: ScreenConfig) -> pd.DataFrame:
+    result_dir = config.data_dir / "screening_results"
+    if not result_dir.exists():
+        return pd.DataFrame()
+    current_date = datetime.strptime(today_stamp(), "%Y%m%d").date()
+    candidates: list[tuple[date, Path]] = []
+    for path in result_dir.glob("*.csv"):
+        try:
+            snapshot_date = datetime.strptime(path.stem, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if snapshot_date < current_date:
+            candidates.append((snapshot_date, path))
+    if not candidates:
+        return pd.DataFrame()
+    _, latest_path = max(candidates, key=lambda item: item[0])
+    previous = read_csv(latest_path)
+    return previous if previous is not None else pd.DataFrame()
+
+
+def is_true_flag(value) -> bool:
+    if value is True:
+        return True
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def preserve_unconfirmed_previous_screening(
+    final_df: pd.DataFrame,
+    previous_df: pd.DataFrame,
+    spot: pd.DataFrame,
+    values: pd.DataFrame | None,
+    dividends: pd.DataFrame | None,
+    diagnostics: dict,
+) -> pd.DataFrame:
+    if previous_df is None or previous_df.empty:
+        diagnostics["preserved_unconfirmed_count"] = 0
+        return final_df
+
+    final = normalize_code_columns(final_df.copy()) if final_df is not None else pd.DataFrame()
+    previous_rows = screening_snapshot_rows(previous_df)
+    spot_rows = screening_snapshot_rows(spot)
+    value_rows = screening_snapshot_rows(values)
+    dividend_rows = screening_snapshot_rows(dividends)
+    final_codes = set(screening_snapshot_rows(final))
+    preserved = []
+
+    for code, previous_row in previous_rows.items():
+        if code in final_codes:
+            continue
+
+        spot_row = spot_rows.get(code)
+        if spot_row is not None and is_st_stock_name(spot_row.get("名称")):
+            continue
+
+        value_row = value_rows.get(code)
+        if value_row is not None and not has_text(value_row.get("价格错误")):
+            if not is_true_flag(value_row.get("价格达标")):
+                continue
+
+            dividend_row = dividend_rows.get(code)
+            if dividend_row is not None and not has_text(dividend_row.get("股息错误")):
+                if not is_true_flag(dividend_row.get("股息率达标")):
+                    continue
+
+        record = previous_row.to_dict()
+        record["代码"] = code
+        record["数据状态"] = "沿用上一版：当前数据待补齐"
+        preserved.append(record)
+
+    diagnostics["preserved_unconfirmed_count"] = len(preserved)
+    if preserved:
+        log(f"保留上一版未确认股票：{len(preserved)} 条（数据未补齐，未明确不满足筛选）")
+        final = pd.concat([final, pd.DataFrame(preserved)], ignore_index=True, sort=False)
+        final = final.drop_duplicates(subset=["代码"], keep="first")
+    return final
+
+
 def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     ensure_cache_dir(config.cache_dir)
     ensure_data_dir(config.data_dir)
+    previous_screening = latest_previous_screening_result(config)
+    previous_codes = set(screening_snapshot_rows(previous_screening))
     spot = fetch_spot(config)
     spot = spot.sort_values("代码").copy()
+    spot_all = spot.copy()
     before_st_filter = len(spot)
     if "名称" in spot.columns:
         spot = spot[~spot["名称"].map(is_st_stock_name)].copy()
@@ -1580,6 +1667,7 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         "price_retry_count": 0,
         "price_prescreen_candidate_count": 0,
         "price_prescreen_error_count": 0,
+        "preserved_unconfirmed_count": 0,
         "dividend_error_count": 0,
         "industry_error_count": 0,
         "valuation_prefilter_count": 0,
@@ -1616,12 +1704,23 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         prescreen.loc[prescreen["价格预筛达标"] | prescreen["前复权历史已缓存"], "代码"]
         .map(normalize_symbol)
     )
+    candidate_codes.update(previous_codes.intersection(set(spot["代码"].map(normalize_symbol))))
     diagnostics["price_prescreen_candidate_count"] = len(candidate_codes)
     diagnostics["price_prescreen_error_count"] = int(prescreen["价格预筛错误"].map(has_text).sum())
     log(f"前复权确认候选：{len(candidate_codes)}/{len(spot)} 条（本地预筛或已有前复权缓存）")
     if not candidate_codes:
         write_failure_report(failure_records, config, diagnostics)
-        return pd.DataFrame(), diagnostics
+        final_df = preserve_unconfirmed_previous_screening(
+            pd.DataFrame(),
+            previous_screening,
+            spot_all,
+            None,
+            None,
+            diagnostics,
+        )
+        result_path = config.data_dir / "screening_results" / f"{today_stamp()}.csv"
+        write_csv(final_df, result_path)
+        return final_df, diagnostics
     candidate_spot = spot[spot["代码"].isin(candidate_codes)].copy()
 
     value_rows = parallel_map(
@@ -1636,7 +1735,17 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     values = pd.DataFrame(value_rows)
     if values.empty:
         diagnostics["price_error_count"] = len(spot)
-        return values, diagnostics
+        final_df = preserve_unconfirmed_previous_screening(
+            pd.DataFrame(),
+            previous_screening,
+            spot_all,
+            values,
+            None,
+            diagnostics,
+        )
+        result_path = config.data_dir / "screening_results" / f"{today_stamp()}.csv"
+        write_csv(final_df, result_path)
+        return final_df, diagnostics
     values = ensure_price_valuation_columns(values)
     if "代码" in values.columns:
         values["代码"] = values["代码"].map(normalize_symbol)
@@ -1683,7 +1792,17 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
 
     if price_prefiltered.empty:
         write_failure_report(failure_records, config, diagnostics)
-        return price_prefiltered, diagnostics
+        final_df = preserve_unconfirmed_previous_screening(
+            pd.DataFrame(),
+            previous_screening,
+            spot_all,
+            values,
+            None,
+            diagnostics,
+        )
+        result_path = config.data_dir / "screening_results" / f"{today_stamp()}.csv"
+        write_csv(final_df, result_path)
+        return final_df, diagnostics
 
     dividend_rows = parallel_map(
         "股息率",
@@ -1730,6 +1849,14 @@ def build_real_screen(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         final_df = final_df.merge(industry, on="代码", how="left")
     else:
         final_df["所属行业"] = ""
+    final_df = preserve_unconfirmed_previous_screening(
+        final_df,
+        previous_screening,
+        spot_all,
+        values,
+        dividends,
+        diagnostics,
+    )
     write_failure_report(failure_records, config, diagnostics)
     result_path = config.data_dir / "screening_results" / f"{today_stamp()}.csv"
     write_csv(final_df, result_path)
@@ -2320,17 +2447,58 @@ def latest_price_from_row(row: pd.Series) -> float | None:
     return None
 
 
-def cached_price_deviation(symbol: str, latest_price: float, config: ScreenConfig, snapshot_date: date) -> float:
-    history = read_csv(price_history_data_path(symbol, config))
+def load_price_history_for_recalc(
+    symbol: str,
+    latest_price: float,
+    config: ScreenConfig,
+    snapshot_date: date,
+) -> pd.DataFrame:
+    data_path = price_history_data_path(symbol, config)
+    history = read_csv(data_path)
+    needs_refill = history is None or history.empty
+    if not needs_refill:
+        date_col = pick_column(history.columns, ["日期", "date"])
+        close_col = pick_column(history.columns, ["收盘", "close"])
+        if date_col is None or close_col is None:
+            needs_refill = True
+        else:
+            dated = history.copy()
+            dated[date_col] = pd.to_datetime(dated[date_col], errors="coerce")
+            dated[close_col] = pd.to_numeric(dated[close_col], errors="coerce")
+            dated = dated[
+                (dated[date_col].notna())
+                & (dated[date_col] <= pd.Timestamp(snapshot_date))
+                & (dated[close_col].notna())
+            ]
+            needs_refill = len(dated) < config.price_window
+
+    if needs_refill:
+        history = fetch_price_history(symbol, config, latest_price=latest_price)
+        if history is not None and not history.empty:
+            write_csv(history, data_path)
     if history is None or history.empty:
         raise RuntimeError("前复权历史缺失")
+    return history
+
+
+def cached_price_deviation(symbol: str, latest_price: float, config: ScreenConfig, snapshot_date: date) -> float:
+    history = load_price_history_for_recalc(symbol, latest_price, config, snapshot_date)
     history = append_latest_price_to_history(history, latest_price, snapshot_date)
+    date_col = pick_column(history.columns, ["日期", "date"])
     close_col = pick_column(history.columns, ["收盘", "close"])
+    if date_col is None:
+        raise RuntimeError("前复权日期字段缺失")
     if close_col is None:
         raise RuntimeError("前复权收盘价字段缺失")
     work = history.copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
     work[close_col] = pd.to_numeric(work[close_col], errors="coerce")
-    work = work[work[close_col].notna()].copy()
+    work = work[
+        (work[date_col].notna())
+        & (work[date_col] <= pd.Timestamp(snapshot_date))
+        & (work[close_col].notna())
+    ].copy()
+    work = work.sort_values(date_col).drop_duplicates(subset=[date_col], keep="last")
     if len(work) < config.price_window:
         raise RuntimeError(f"前复权历史不足 {config.price_window}")
     ma = float(work[close_col].tail(config.price_window).mean())
@@ -2386,6 +2554,7 @@ def current_screening_status_for_removed(
         return {"当前半年线乖离率": None, "当前股息率": None, "剔除原因": "当前价格缺失"}
 
     reasons = []
+    pending_checks = []
     price_deviation = None
     dividend_yield = None
     try:
@@ -2393,17 +2562,21 @@ def current_screening_status_for_removed(
         if price_deviation > config.max_below_ma_pct:
             reasons.append(f"半年线乖离率 {fmt_num(price_deviation, 2, '%')}，未低于 {fmt_num(config.max_below_ma_pct, 2, '%')}")
     except Exception as exc:
-        reasons.append(f"价格指标无法复算：{exc}")
+        message = str(exc)
+        pending_checks.append("前复权历史待补齐" if "前复权历史" in message else "价格数据待补齐")
 
     try:
         dividend_yield = cached_dividend_yield_ttm(symbol, latest_price, config, snapshot_date)
         if dividend_yield <= config.min_dividend_yield_pct:
             reasons.append(f"股息率 {fmt_num(dividend_yield, 2, '%')}，未高于 {fmt_num(config.min_dividend_yield_pct, 2, '%')}")
     except Exception as exc:
-        reasons.append(f"股息指标无法复算：{exc}")
+        pending_checks.append("股息数据待补齐")
 
     if not reasons:
-        reasons.append("当前本地复算仍满足，可能是当日生成时接口缺失或字段未补全")
+        if pending_checks:
+            reasons.append(f"出榜原因待确认（{'、'.join(dict.fromkeys(pending_checks))}）")
+        else:
+            reasons.append("当前本地复算仍满足，可能是当日生成时接口缺失或字段未补全")
     return {
         "当前半年线乖离率": price_deviation,
         "当前股息率": dividend_yield,
@@ -3274,7 +3447,7 @@ def build_html(
         <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
         <div class="meta">
           生成时间（上海）：{html.escape(str(diagnostics.get("generated_at", "")))}<br>
-          本地候选：{diagnostics.get("price_prescreen_candidate_count", 0)}；前复权达标：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；价格失败：{diagnostics.get("price_error_count", 0)}；历史不足：{diagnostics.get("history_short_count", 0)}；估值缺失：{diagnostics.get("valuation_incomplete_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}；重试股票：{diagnostics.get("price_retry_count", 0)}
+          本地候选：{diagnostics.get("price_prescreen_candidate_count", 0)}；前复权达标：{diagnostics.get("price_prefilter_count", 0)}；股息筛后：{diagnostics.get("valuation_prefilter_count", 0)}；保留未确认：{diagnostics.get("preserved_unconfirmed_count", 0)}；价格失败：{diagnostics.get("price_error_count", 0)}；历史不足：{diagnostics.get("history_short_count", 0)}；估值缺失：{diagnostics.get("valuation_incomplete_count", 0)}；股息失败：{diagnostics.get("dividend_error_count", 0)}；行业失败：{diagnostics.get("industry_error_count", 0)}；重试股票：{diagnostics.get("price_retry_count", 0)}
         </div>
       </div>
       {warning}

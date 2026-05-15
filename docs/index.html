@@ -411,7 +411,7 @@
       <div class="card"><div class="label">覆盖股票</div><div class="value">5253</div><div class="hint">真实数据</div></div>
       <div class="card"><div class="label">平均股息率</div><div class="value">4.83%</div><div class="hint">入选股票均值</div></div>
       <div class="card"><div class="label">平均半年线乖离</div><div class="value">-14.86%</div><div class="hint">越低代表越偏离半年线</div></div>
-      <div class="card"><div class="label">覆盖行业</div><div class="value">92</div><div class="hint">按东方财富个股行业</div></div>
+      <div class="card"><div class="label">覆盖行业</div><div class="value">90</div><div class="hint">按东方财富个股行业</div></div>
     </section>
     <nav class="tabs" role="tablist" aria-label="看板标签页">
       <button class="tab-btn active" data-tab="screen" role="tab" aria-selected="true" onclick="switchTab('screen')">低估高息筛选</button>
@@ -421,11 +421,11 @@
       <div class="toolbar">
         <input id="search" class="search" oninput="filterTable()" placeholder="搜索代码、名称、行业">
         <div class="meta">
-          生成时间（上海）：2026-05-15 23:05:24<br>
-          本地候选：1391；前复权达标：1196；股息筛后：136；保留未确认：0；价格失败：0；历史不足：0；估值缺失：7；股息失败：0；行业失败：0；重试股票：0
+          生成时间（上海）：2026-05-16 02:24:47<br>
+          本地候选：1394；前复权达标：1196；股息筛后：136；保留未确认：0；价格失败：0；历史不足：0；估值缺失：7；股息失败：2；行业失败：0；重试股票：0
         </div>
       </div>
-      <div class='warning'>部分股票估值字段缺失，但价格与股息筛选仍可继续；PE/PB 分位仅用于参考展示。 失败清单：data/a_share/failures/20260515.csv。</div>
+      <div class='warning'>已自动重试，仍有部分股票因接口返回空、历史不足或字段缺失未补全。AKShare 依赖外部网站，后续可用缓存继续补跑。 失败清单：data/a_share/failures/20260515.csv。</div>
       
       
       <section class="change-section" aria-label="最近5个交易日榜单变化">
@@ -477,8 +477,8 @@
 <tr><td>2026-05-15</td><td><strong>300146</strong></td><td>汤臣倍健</td><td>保健品</td><td class='num'>10.17</td><td class='num danger'>-10.06%</td><td class='num'>4.42%</td></tr>
 <tr><td>2026-05-15</td><td><strong>603899</strong></td><td>晨光股份</td><td>文化用品</td><td class='num'>23.74</td><td class='num danger'>-11.19%</td><td class='num'>4.21%</td></tr>
 <tr><td>2026-05-15</td><td><strong>002632</strong></td><td>道明光学</td><td>膜材料</td><td class='num'>11.07</td><td class='num danger'>-10.00%</td><td class='num'>3.88%</td></tr>
-<tr><td>2026-05-15</td><td><strong>000498</strong></td><td>山东路桥</td><td>基础建设</td><td class='num'>5.35</td><td class='num danger'>-10.72%</td><td class='num'>3.83%</td></tr>
-<tr><td>2026-05-15</td><td><strong>000513</strong></td><td>丽珠集团</td><td>化学制药</td><td class='num'>30.88</td><td class='num danger'>-11.25%</td><td class='num'>3.56%</td></tr>
+<tr><td>2026-05-15</td><td><strong>000498</strong></td><td>山东路桥</td><td>基建市政工程</td><td class='num'>5.35</td><td class='num danger'>-10.72%</td><td class='num'>3.83%</td></tr>
+<tr><td>2026-05-15</td><td><strong>000513</strong></td><td>丽珠集团</td><td>化学制剂</td><td class='num'>30.88</td><td class='num danger'>-11.25%</td><td class='num'>3.56%</td></tr>
 <tr><td>2026-05-15</td><td><strong>600720</strong></td><td>中交设计</td><td>工程咨询服务Ⅲ</td><td class='num'>6.43</td><td class='num danger'>-10.77%</td><td class='num'>3.56%</td></tr>
 <tr><td>2026-05-15</td><td><strong>600019</strong></td><td>宝钢股份</td><td>板材</td><td class='num'>6.22</td><td class='num danger'>-10.43%</td><td class='num'>3.54%</td></tr>
 <tr><td>2026-05-15</td><td><strong>600529</strong></td><td>山东药玻</td><td>医疗耗材</td><td class='num'>17.68</td><td class='num danger'>-10.64%</td><td class='num'>3.39%</td></tr>
@@ -600,7 +600,7 @@
         <div class="final-list-meta">
           <span>榜单日期：<strong>2026-05-15</strong></span>
           <span>入选数量：<strong>136</strong></span>
-          <span>覆盖行业：<strong>92</strong></span>
+          <span>覆盖行业：<strong>90</strong></span>
           <span>平均股息率：<strong>4.83%</strong></span>
           <span>平均半年线乖离：<strong>-14.86%</strong></span>
         </div>
@@ -716,7 +716,7 @@
 <tr><td><strong>600269</strong></td><td>赣粤高速</td><td>高速公路</td><td class='num'>4.39</td><td class='num'>4.94</td><td class='num danger'>-11.14%</td><td class='num'>3.87%</td><td class='num'>9.10</td><td class='num'>46.7%</td><td class='num'>0.52</td><td class='num'>31.4%</td><td class='num'>103 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>603456</strong></td><td>九洲药业</td><td>医疗研发外包</td><td class='num'>12.99</td><td class='num'>17.52</td><td class='num danger'>-25.87%</td><td class='num'>3.85%</td><td class='num'>17.72</td><td class='num'>11.6%</td><td class='num'>1.30</td><td class='num'>0.4%</td><td class='num'>116 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>000501</strong></td><td>武商集团</td><td>一般零售</td><td class='num'>7.81</td><td class='num'>9.46</td><td class='num danger'>-17.40%</td><td class='num'>3.84%</td><td class='num'>37.25</td><td class='num'>90.9%</td><td class='num'>0.54</td><td class='num'>7.7%</td><td class='num'>60 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
-<tr><td><strong>000498</strong></td><td>山东路桥</td><td>基础建设</td><td class='num'>5.35</td><td class='num'>5.99</td><td class='num danger'>-10.72%</td><td class='num'>3.83%</td><td class='num'>3.87</td><td class='num'>16.4%</td><td class='num'>0.50</td><td class='num'>0.0%</td><td class='num'>83 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
+<tr><td><strong>000498</strong></td><td>山东路桥</td><td>基建市政工程</td><td class='num'>5.35</td><td class='num'>5.99</td><td class='num danger'>-10.72%</td><td class='num'>3.83%</td><td class='num'>3.87</td><td class='num'>16.4%</td><td class='num'>0.50</td><td class='num'>0.0%</td><td class='num'>83 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>002984</strong></td><td>森麒麟</td><td>轮胎轮毂</td><td class='num'>15.65</td><td class='num'>19.68</td><td class='num danger'>-20.49%</td><td class='num'>3.77%</td><td class='num'>16.67</td><td class='num'>36.2%</td><td class='num'>1.19</td><td class='num'>0.1%</td><td class='num'>162 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>300533</strong></td><td>冰川网络</td><td>游戏Ⅲ</td><td class='num'>26.69</td><td class='num'>32.60</td><td class='num danger'>-18.13%</td><td class='num'>3.75%</td><td class='num'>21.97</td><td class='num'>20.6%</td><td class='num'>4.11</td><td class='num'>78.2%</td><td class='num'>63 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>600325</strong></td><td>华发股份</td><td>房地产开发</td><td class='num'>3.31</td><td class='num'>4.11</td><td class='num danger'>-19.45%</td><td class='num'>3.75%</td><td class='num'>11.49</td><td class='num'>85.3%</td><td class='num'>1.06</td><td class='num'>56.5%</td><td class='num'>91 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
@@ -725,7 +725,7 @@
 <tr><td><strong>300791</strong></td><td>仙乐健康</td><td>保健品</td><td class='num'>17.58</td><td class='num'>22.23</td><td class='num danger'>-20.93%</td><td class='num'>3.70%</td><td class='num'>46.07</td><td class='num'>86.2%</td><td class='num'>1.95</td><td class='num'>5.9%</td><td class='num'>54 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>002345</strong></td><td>潮宏基</td><td>钟表珠宝</td><td class='num'>9.72</td><td class='num'>11.89</td><td class='num danger'>-18.22%</td><td class='num'>3.60%</td><td class='num'>15.10</td><td class='num'>26.0%</td><td class='num'>2.15</td><td class='num'>81.0%</td><td class='num'>86 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>300641</strong></td><td>正丹股份</td><td>其他化学制品</td><td class='num'>16.67</td><td class='num'>19.35</td><td class='num danger'>-13.83%</td><td class='num'>3.60%</td><td class='num'>22.31</td><td class='num'>18.5%</td><td class='num'>2.67</td><td class='num'>66.7%</td><td class='num'>88 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
-<tr><td><strong>000513</strong></td><td>丽珠集团</td><td>化学制药</td><td class='num'>30.88</td><td class='num'>34.80</td><td class='num danger'>-11.25%</td><td class='num'>3.56%</td><td class='num'>13.96</td><td class='num'>9.9%</td><td class='num'>1.89</td><td class='num'>2.2%</td><td class='num'>274 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
+<tr><td><strong>000513</strong></td><td>丽珠集团</td><td>化学制剂</td><td class='num'>30.88</td><td class='num'>34.80</td><td class='num danger'>-11.25%</td><td class='num'>3.56%</td><td class='num'>13.96</td><td class='num'>9.9%</td><td class='num'>1.89</td><td class='num'>2.2%</td><td class='num'>274 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>600720</strong></td><td>中交设计</td><td>工程咨询服务Ⅲ</td><td class='num'>6.43</td><td class='num'>7.21</td><td class='num danger'>-10.77%</td><td class='num'>3.56%</td><td class='num'>10.30</td><td class='num'>49.4%</td><td class='num'>0.93</td><td class='num'>7.5%</td><td class='num'>148 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>603605</strong></td><td>珀莱雅</td><td>品牌化妆品</td><td class='num'>56.12</td><td class='num'>67.21</td><td class='num danger'>-16.50%</td><td class='num'>3.55%</td><td class='num'>15.08</td><td class='num'>0.4%</td><td class='num'>3.50</td><td class='num'>0.9%</td><td class='num'>222 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>
 <tr><td><strong>600019</strong></td><td>宝钢股份</td><td>板材</td><td class='num'>6.22</td><td class='num'>6.94</td><td class='num danger'>-10.43%</td><td class='num'>3.54%</td><td class='num'>13.36</td><td class='num'>72.7%</td><td class='num'>0.65</td><td class='num'>14.2%</td><td class='num'>1,355 亿</td><td>2026-05-15</td><td>2026-05-15</td></tr>

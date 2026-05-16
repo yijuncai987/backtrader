@@ -1635,7 +1635,11 @@ def preserve_unconfirmed_previous_screening(
     diagnostics["preserved_unconfirmed_count"] = len(preserved)
     if preserved:
         log(f"保留上一版未确认股票：{len(preserved)} 条（数据未补齐，未明确不满足筛选）")
-        final = pd.concat([final, pd.DataFrame(preserved)], ignore_index=True, sort=False)
+        preserved_df = pd.DataFrame(preserved)
+        if final.empty:
+            final = preserved_df
+        else:
+            final = pd.concat([final, preserved_df], ignore_index=True, sort=False)
         final = final.drop_duplicates(subset=["代码"], keep="first")
     return final
 
@@ -2595,10 +2599,15 @@ def annotate_removed_screening_changes(
     spot = spot_snapshot_for_date(config, snapshot_date)
     spot_rows = screening_snapshot_rows(spot)
     work = removed.copy()
+    pending_indexes = []
     for idx, row in work.iterrows():
         status = current_screening_status_for_removed(row.get("代码"), config, snapshot_date, spot_rows)
         for key, value in status.items():
             work.at[idx, key] = value
+        if str(status.get("剔除原因") or "").startswith("出榜原因待确认"):
+            pending_indexes.append(idx)
+    if pending_indexes:
+        work = work.drop(index=pending_indexes)
     return sort_screening_changes(work)
 
 

@@ -315,11 +315,8 @@ def test_removed_screening_changes_do_not_blame_missing_price_history(monkeypatc
     monkeypatch.setattr(dashboard, "fetch_price_history", fail_fetch_price_history)
 
     changes = dashboard.build_screening_changes(pd.DataFrame(), config, current_date=real_date(2026, 5, 12))
-    reason = changes["removed"].iloc[0]["剔除原因"]
 
-    assert "价格指标无法复算" not in reason
-    assert "前复权历史缺失" not in reason
-    assert reason == "出榜原因待确认（前复权历史待补齐）"
+    assert changes["removed"].empty
 
 
 def write_previous_screening(config: ScreenConfig, rows: list[dict]) -> None:
@@ -500,6 +497,94 @@ def test_real_screen_removes_previous_stock_when_dividend_explicitly_fails(monke
 
     assert result.empty
     assert diagnostics["preserved_unconfirmed_count"] == 0
+
+
+def test_real_screen_keeps_previous_stock_when_dividend_data_is_incomplete(monkeypatch, tmp_path):
+    config = real_screen_config(tmp_path)
+    write_previous_screening(config, [previous_screening_row()])
+
+    monkeypatch.setattr(
+        dashboard,
+        "fetch_spot",
+        lambda config: pd.DataFrame({"代码": ["000001"], "名称": ["一号"], "最新价": [8.5]}),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "local_price_prescreen_metrics",
+        lambda row, config: {
+            "代码": "000001",
+            "价格预筛达标": False,
+            "前复权历史已缓存": False,
+            "价格预筛错误": "",
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "price_valuation_metrics",
+        lambda row, config: {
+            "代码": "000001",
+            "现价": 8.5,
+            "半年线": 10.0,
+            "半年线乖离率": -15.0,
+            "价格达标": True,
+            "价格数据日期": "2026-05-12",
+            "市盈率": 10.0,
+            "市净率": 1.0,
+            "市盈率10年分位": 20.0,
+            "市净率10年分位": 20.0,
+            "估值分位达标": True,
+            "估值数据日期": "2026-05-12",
+            "总市值_估值源": 1_000_000_000.0,
+            "价格错误": "",
+            "估值错误": "",
+            "价格估值错误": "",
+            "数据状态": "正常",
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "dividend_metrics",
+        lambda row, config: {
+            "代码": "000001",
+            "股息率": None,
+            "股息率达标": False,
+            "股息数据日期": "",
+            "股息错误": "股息历史缺失",
+        },
+    )
+
+    result, diagnostics = dashboard.build_real_screen(config)
+
+    assert result["代码"].tolist() == ["000001"]
+    assert result.iloc[0]["数据状态"] == "沿用上一版：当前数据待补齐"
+    assert diagnostics["preserved_unconfirmed_count"] == 1
+
+
+def test_pending_removed_screening_changes_are_not_shown_as_removed(tmp_path):
+    config = ScreenConfig(cache_dir=tmp_path / "cache", data_dir=tmp_path / "data", price_window=3)
+    ensure_data_dir(config.data_dir)
+    pd.DataFrame([previous_screening_row()]).to_csv(
+        config.data_dir / "screening_results" / "20260514.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    pd.DataFrame(
+        {
+            "代码": ["000001"],
+            "名称": ["一号"],
+            "最新价": [8.5],
+        }
+    ).to_csv(config.data_dir / "spot" / "20260515.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(
+        {
+            "date": ["2026-05-13", "2026-05-14"],
+            "close": [10.0, 10.0],
+        }
+    ).to_csv(config.data_dir / "price_history_qfq" / "000001.csv", index=False, encoding="utf-8-sig")
+
+    changes = dashboard.build_screening_changes(pd.DataFrame(), config, current_date=real_date(2026, 5, 15))
+
+    assert changes["removed"].empty
 
 
 def test_default_live_fetching_prefers_stability():

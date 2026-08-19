@@ -41,6 +41,7 @@ DEFAULT_CACHE_DIR = Path("cache") / "a_share_value_dashboard"
 DEFAULT_DATA_DIR = Path("data") / "a_share"
 MARKET_TZ = ZoneInfo("Asia/Shanghai")
 MIN_USABLE_SPOT_ROWS = 1000
+CROWDING_TOP_PERCENT = 5.0
 
 
 @dataclass
@@ -2167,11 +2168,82 @@ def build_margin_change_monitor(config: ScreenConfig) -> pd.DataFrame:
     return merged[["日期", "融资余额", "融资余额增长率"]]
 
 
+def compute_crowding_from_spot(snapshot: pd.DataFrame) -> dict | None:
+    """成交额排名前 5% 个股成交额占全市场成交额的比值，样本为当日有成交的个股。"""
+    if snapshot is None or snapshot.empty:
+        return None
+    amount_col = pick_column(snapshot.columns, ["成交额", "amount"])
+    if amount_col is None:
+        return None
+    amounts = pd.to_numeric(snapshot[amount_col], errors="coerce")
+    amounts = amounts[amounts > 0].sort_values(ascending=False)
+    if amounts.empty:
+        return None
+    total_amount = float(amounts.sum())
+    if total_amount <= 0:
+        return None
+    top_count = math.ceil(len(amounts) * CROWDING_TOP_PERCENT / 100)
+    top_amount = float(amounts.iloc[:top_count].sum())
+    return {
+        "拥挤度": top_amount / total_amount * 100,
+        "前5%成交额": top_amount,
+        "全市场成交额": total_amount,
+    }
+
+
+def build_crowding_monitor(config: ScreenConfig) -> pd.DataFrame:
+    spot_dir = config.data_dir / "spot"
+    if not spot_dir.exists():
+        raise RuntimeError(f"行情快照目录不存在：{spot_dir}")
+
+    start, _ = monitor_date_window(config)
+    scan_start = start - timedelta(days=10)
+    today_name = f"{today_stamp()}.csv"
+    rows = []
+    previous_fingerprint = None
+    for snapshot_path in sorted(spot_dir.glob("*.csv")):
+        try:
+            stamp_date = datetime.strptime(snapshot_path.stem, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if stamp_date < scan_start:
+            continue
+        snapshot = read_spot_snapshot(snapshot_path, min_rows=MIN_USABLE_SPOT_ROWS)
+        if snapshot is None:
+            continue
+        metrics = compute_crowding_from_spot(snapshot)
+        if metrics is None:
+            continue
+        # 同一交易日的行情会以运行日的日历日期重复归档（周末快照、次日凌晨运行），
+        # 以成交额合计为指纹跳过与上一份完全相同的快照，宁可留空也不写错日期。
+        fingerprint = (round(metrics["前5%成交额"], 2), round(metrics["全市场成交额"], 2))
+        duplicated = fingerprint == previous_fingerprint
+        previous_fingerprint = fingerprint
+        if duplicated:
+            continue
+        if snapshot_path.name == today_name:
+            data_date = current_market_data_date()
+        elif is_probable_trading_day(stamp_date):
+            data_date = stamp_date
+        else:
+            continue
+        rows.append({"日期": data_date.isoformat(), **metrics})
+
+    if not rows:
+        raise RuntimeError(f"行情快照不足，无法计算拥挤度：{spot_dir}")
+    work = pd.DataFrame(rows)
+    work = work[work["日期"] >= start.isoformat()].copy()
+    work = work.sort_values("日期").drop_duplicates(subset=["日期"], keep="last")
+    if work.empty:
+        raise RuntimeError("监测窗口内没有可用的拥挤度数据")
+    return work[["日期", "拥挤度", "前5%成交额", "全市场成交额"]]
+
+
 def build_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     start, _ = monitor_date_window(config)
     diagnostics = {
         "market_monitor_error": "",
-        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指；北交所成交量可用时纳入，不可用时先按沪深两市估算)；融资余额：上海 + 深圳两市融资余额；融资余额5日涨幅：当天融资余额 / 5个交易日前融资余额 - 1",
+        "market_monitor_source": "成交量：沪深300 / (上证指数 + 深证综指；北交所成交量可用时纳入，不可用时先按沪深两市估算)；融资余额：上海 + 深圳两市融资余额；融资余额5日涨幅：当天融资余额 / 5个交易日前融资余额 - 1；拥挤度：当日成交额排名前 5% 个股成交额合计 / 全市场成交额（含北交所，成交额不含大宗交易）",
     }
     pieces = []
     errors = []
@@ -2185,6 +2257,11 @@ def build_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
         pieces.append(build_margin_change_monitor(config))
     except Exception as exc:
         errors.append(f"融资余额：{exc}")
+
+    try:
+        pieces.append(build_crowding_monitor(config))
+    except Exception as exc:
+        errors.append(f"拥挤度：{exc}")
 
     if not pieces:
         diagnostics["market_monitor_error"] = "；".join(errors)
@@ -2214,6 +2291,8 @@ def demo_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
             ratio = 18 + math.sin(idx / 5) * 2.5 + (idx % 7) * 0.15
             daily_change = math.sin(idx / 6) * 0.18 + 0.03
             balance *= 1 + daily_change / 100
+            crowding = 46 + math.sin(idx / 4) * 4 + (idx % 5) * 0.3
+            market_amount = 2.4e12 * (1 + math.sin(idx / 7) * 0.15)
             rows.append(
                 {
                     "日期": current.isoformat(),
@@ -2222,6 +2301,9 @@ def demo_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
                     "沪深300成交占比": ratio,
                     "融资余额": balance,
                     "融资余额增长率": None,
+                    "拥挤度": crowding,
+                    "前5%成交额": market_amount * crowding / 100,
+                    "全市场成交额": market_amount,
                 }
             )
             idx += 1
@@ -2236,7 +2318,7 @@ def demo_market_monitor(config: ScreenConfig) -> tuple[pd.DataFrame, dict]:
     }
 
 
-MARKET_MONITOR_COLUMNS = ["日期", "沪深300成交占比", "沪深300成交量", "市场总成交量", "融资余额", "融资余额增长率"]
+MARKET_MONITOR_COLUMNS = ["日期", "沪深300成交占比", "沪深300成交量", "市场总成交量", "融资余额", "融资余额增长率", "拥挤度", "前5%成交额", "全市场成交额"]
 
 
 def normalize_market_monitor_output(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -3319,7 +3401,7 @@ def build_html(
       if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
       return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits, minimumFractionDigits: digits }) + suffix;
     }
-    function renderLineChart(targetId, key, unit, color, label = key) {
+    function renderLineChart(targetId, key, unit, color, label = key, referenceLines = []) {
       const target = document.getElementById(targetId);
       if (!target) return;
       const points = marketMonitorData
@@ -3335,6 +3417,10 @@ def build_html(
       const values = points.map(p => Number(p.value));
       let min = Math.min(...values);
       let max = Math.max(...values);
+      for (const ref of referenceLines) {
+        min = Math.min(min, Number(ref.value));
+        max = Math.max(max, Number(ref.value));
+      }
       if (min === max) {
         min -= 1;
         max += 1;
@@ -3360,9 +3446,14 @@ def build_html(
         const title = `${p.date}：${formatNumber(p.value, 2, unit)}`;
         return `<circle cx="${x(index).toFixed(2)}" cy="${y(p.value).toFixed(2)}" r="3" fill="${color}"><title>${title}</title></circle>`;
       }).join('');
+      const refLines = referenceLines.map(ref => {
+        const yy = y(ref.value);
+        return `<line x1="${margin.left}" y1="${yy.toFixed(2)}" x2="${width - margin.right}" y2="${yy.toFixed(2)}" stroke="${ref.color}" stroke-width="1.5" stroke-dasharray="6 5"/><text x="${width - margin.right - 4}" y="${(yy - 6).toFixed(2)}" text-anchor="end" fill="${ref.color}" font-size="11">${formatNumber(ref.value, 0, unit)}</text>`;
+      }).join('');
       target.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${label}曲线">
         ${grid}
         <line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" stroke="#d8dee9"/>
+        ${refLines}
         <polyline fill="none" stroke="${color}" stroke-width="2.5" points="${line}"/>
         ${dots}
         ${xLabels}
@@ -3403,14 +3494,17 @@ def build_html(
       if (monitorRendered) return;
       renderLineChart('volume-ratio-chart', '沪深300成交占比', '%', '#0f766e');
       renderLineChart('margin-change-chart', '融资余额增长率', '%', '#2563eb', '融资余额5日涨幅');
+      renderLineChart('crowding-chart', '拥挤度', '%', '#b45309', '大盘拥挤度', [{value: 45, color: '#f59e0b'}, {value: 50, color: '#dc2626'}]);
       const latestNode = document.getElementById('monitor-latest');
       if (latestNode) {
         const latestVolume = [...marketMonitorData].reverse().find(row => row['沪深300成交占比'] !== null);
         const latestMargin = [...marketMonitorData].reverse().find(row => row['融资余额增长率'] !== null);
-        if (latestVolume || latestMargin) {
+        const latestCrowding = [...marketMonitorData].reverse().find(row => row['拥挤度'] !== null);
+        if (latestVolume || latestMargin || latestCrowding) {
           const volumeText = latestVolume ? `${latestVolume['日期']} 成交占比 ${formatNumber(latestVolume['沪深300成交占比'], 2, '%')}` : '成交占比暂无数据';
           const marginText = latestMargin ? `${latestMargin['日期']} 融资余额5日涨幅 ${formatNumber(latestMargin['融资余额增长率'], 2, '%')}` : '融资余额5日涨幅暂无数据';
-          latestNode.textContent = `${volumeText}；${marginText}`;
+          const crowdingText = latestCrowding ? `${latestCrowding['日期']} 拥挤度 ${formatNumber(latestCrowding['拥挤度'], 2, '%')}` : '拥挤度暂无数据';
+          latestNode.textContent = `${volumeText}；${marginText}；${crowdingText}`;
         } else {
           latestNode.textContent = '暂无市场监测数据';
         }
@@ -3506,7 +3600,7 @@ def build_html(
       <div class="monitor-head">
         <div>
           <h2>最近90天市场监测</h2>
-          <p>沪深300成交占比 = 沪深300成交量 / 沪深两市成交量合计；北交所成交量可用时纳入；融资余额5日涨幅 = 当天融资余额 / 5个交易日前融资余额 - 1。</p>
+          <p>沪深300成交占比 = 沪深300成交量 / 沪深两市成交量合计；北交所成交量可用时纳入；融资余额5日涨幅 = 当天融资余额 / 5个交易日前融资余额 - 1；大盘拥挤度 = 成交额排名前5%个股成交额 / 全市场成交额，低于40%交易分散，40%~50%集中度上升，高于50%进入预警区域。</p>
         </div>
         <div class="meta">
           样本交易日：{monitor_count}<br>
@@ -3528,6 +3622,13 @@ def build_html(
             <span class="chart-subtitle">单位：%</span>
           </div>
           <div id="margin-change-chart" class="chart-canvas"></div>
+        </section>
+        <section class="chart-box">
+          <div class="chart-title">
+            <span>大盘拥挤度</span>
+            <span class="chart-subtitle">单位：%</span>
+          </div>
+          <div id="crowding-chart" class="chart-canvas"></div>
         </section>
       </div>
       <div class="foot">

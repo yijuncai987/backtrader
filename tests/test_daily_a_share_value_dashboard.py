@@ -1,5 +1,5 @@
 import json
-from datetime import date as real_date, timezone
+from datetime import date as real_date, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -10,7 +10,9 @@ pytest.importorskip("akshare")
 import daily_a_share_value_dashboard as dashboard  # noqa: E402
 from daily_a_share_value_dashboard import (  # noqa: E402
     ScreenConfig,
+    build_crowding_monitor,
     build_html,
+    compute_crowding_from_spot,
     demo_market_monitor,
     demo_screen,
     ensure_cache_dir,
@@ -35,6 +37,7 @@ def test_demo_market_monitor_uses_default_90_day_window():
     assert not monitor.empty
     assert "沪深300成交占比" in monitor.columns
     assert "融资余额增长率" in monitor.columns
+    assert "拥挤度" in monitor.columns
     assert monitor["日期"].min() >= start.isoformat()
     assert monitor["日期"].max() <= end.isoformat()
 
@@ -48,6 +51,65 @@ def test_monitor_records_for_html_serializes_chart_metrics():
     assert len(records) == len(monitor)
     assert records[0]["沪深300成交占比"] is not None
     assert any(record["融资余额增长率"] is not None for record in records)
+    assert records[0]["拥挤度"] is not None
+
+
+def test_compute_crowding_from_spot_matches_manual_calc():
+    # 40 只有成交个股，前 5% 取 ceil(40 * 0.05) = 2 只。
+    spot = pd.DataFrame(
+        {
+            "代码": [f"{600000 + i:06d}" for i in range(41)],
+            "成交额": [100.0 * (i + 1) for i in range(40)] + [0.0],
+        }
+    )
+
+    metrics = compute_crowding_from_spot(spot)
+
+    assert metrics is not None
+    assert metrics["前5%成交额"] == pytest.approx(4000.0 + 3900.0)
+    assert metrics["全市场成交额"] == pytest.approx(82000.0)
+    assert metrics["拥挤度"] == pytest.approx(7900.0 / 82000.0 * 100)
+
+
+def test_compute_crowding_from_spot_rejects_unusable_snapshot():
+    assert compute_crowding_from_spot(pd.DataFrame({"代码": ["600000"]})) is None
+    assert compute_crowding_from_spot(pd.DataFrame({"代码": ["600000"], "成交额": [0.0]})) is None
+
+
+def _write_crowding_snapshot(spot_dir, stamp, amounts):
+    spot_dir.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame(
+        {
+            "代码": [f"{600000 + i:06d}" for i in range(len(amounts))],
+            "成交额": amounts,
+        }
+    )
+    frame.to_csv(spot_dir / f"{stamp:%Y%m%d}.csv", index=False, encoding="utf-8-sig")
+
+
+def test_build_crowding_monitor_skips_weekend_duplicates(tmp_path):
+    config = ScreenConfig(data_dir=tmp_path)
+    friday = real_date.today() - timedelta(days=7)
+    while friday.weekday() != 4:
+        friday -= timedelta(days=1)
+    saturday = friday + timedelta(days=1)
+    monday = friday + timedelta(days=3)
+
+    base = [1000.0 + i for i in range(1200)]
+    changed = [2000.0 + i for i in range(1200)]
+    spot_dir = tmp_path / "spot"
+    _write_crowding_snapshot(spot_dir, friday, base)
+    # 周六快照是周五行情的重复归档，必须被指纹去重跳过。
+    _write_crowding_snapshot(spot_dir, saturday, base)
+    _write_crowding_snapshot(spot_dir, monday, changed)
+
+    monitor = build_crowding_monitor(config)
+
+    assert monitor["日期"].tolist() == [friday.isoformat(), monday.isoformat()]
+    expected = compute_crowding_from_spot(pd.DataFrame({"成交额": base}))
+    assert monitor.iloc[0]["拥挤度"] == pytest.approx(expected["拥挤度"])
+    assert monitor.iloc[0]["前5%成交额"] == pytest.approx(expected["前5%成交额"])
+    assert monitor.iloc[0]["全市场成交额"] == pytest.approx(expected["全市场成交额"])
 
 
 def test_market_index_history_falls_back_to_sina(monkeypatch, tmp_path):
